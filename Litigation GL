@@ -1,0 +1,2678 @@
+GL Litigation Model
+Table Of Contents
+Section 0: Load data
+Section 1: Binary Model using H2O
+Section 1.1: Variable selection using H2O
+Section 1.2: Manually review the variables
+Section 1.3: Categorical variable grouping
+Section 1.4: H2O model with grouped categorical variables
+Section 1.5: XGB
+Section 1.6: Create Weight-of-evidence variables
+Section 1.7: GLM-LASSO
+Section 2: Binary Model with sklearn
+Section 2.1: Without the AI/PI claims
+Section 2.2: Final model
+Section 2.3: Actual vs. Prediction
+Section 3: The SHAP model interpretability
+Section 3.1: Local interpretability
+Appendix 1: XGB waterfall
+Appendix 2: Multi-class models (optional)
+Appendix 2.1: Model the multi-class target "Resolution Group - combining the trial track"
+Appendix 2.2: Model the multi-class "Resolution Group - combining others"
+Section 0: Load data 
+In [1]:
+%%html
+<style>
+  table {margin-left: 0 !important;}
+</style>
+In [2]:
+import numpy as np
+import cx_Oracle
+import pandas as pd
+
+# Working Directory Imports
+import os
+import sys
+sys.path.append('..')
+import os.path
+from os import path
+
+import matplotlib.pyplot as plt
+import pickle
+import seaborn as sns
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+#from dython.nominal import associations
+import warnings
+warnings.filterwarnings("ignore")
+
+__author__ = "chris.kuo@thehartford.com"
+In [3]:
+model = pd.read_pickle('/data/lake/clmds/projects/GL/gl_lit_model.pkl')
+MODELVAR = pd.read_pickle('/data/lake/clmds/projects/GL/gl_MODELVAR.pkl')
+
+# Binary target
+model = model.sort_values(by='TARGET')
+
+# Flip the binary target
+model['TARGET2'] = 1 - model['TARGET']
+model['EXPSR_DEFND_ATTY_REP'] = np.where(model['EXPSR_DEFND_ATTY_REP_IND']=='Y', 1, 0)
+model['TEXT_PRETRIAL_REPORT_D'] = np.where(model['TEXT_PRETRIAL_REPORT']=='Y', 1, 0)
+model['CLM_REOPEN'] = np.where(model['CLM_REOPEN_IND']=='Y', 1, 0)
+
+    
+model = model[model['RPRT_YEAR']>=2012] #.sort_values(by='TARGET2')
+model = model.drop('CLM_ID', axis=1)
+
+#model = model[model['LOSS_CS_DESC']!='AI/PI']
+
+model['TARGET2'].value_counts()
+Out[3]:
+0    19941
+1      890
+Name: TARGET2, dtype: int64
+In [6]:
+model['LOSS_DT'].describe()
+Out[6]:
+count                   20831
+unique                   7833
+top       2017-06-17 00:00:00
+freq                       48
+first     1972-01-22 00:00:00
+last      2021-08-25 00:01:00
+Name: LOSS_DT, dtype: object
+In [4]:
+model.groupby(['TARGET2','RESOLUTION'])['CLM_GID'].agg('count')
+Out[4]:
+TARGET2  RESOLUTION                      
+0        Coverage Denied                       489
+         Default Judgment                        6
+         Defense Tendered                     1014
+         Dismissed                            2200
+         Dismissed - Voluntary Withdrawal     1502
+         Settled - Pre-Trial                 11060
+         Settled - Pre-Trial Arbitration       145
+         Settled - Pre-Trial Mediation        2524
+         Settled - Pre-suit                    392
+         Summary Judgment                      609
+1        Coverage Acknowledged                 188
+         Defense Provided Under ROR             61
+         Judgment – Defendant                  113
+         Judgment – Plaintiff                   64
+         Settled - During Trial                201
+         Settled - Post Trial                   68
+         Verdict – Defendant                   140
+         Verdict – Plaintiff                    55
+Name: CLM_GID, dtype: int64
+In [5]:
+model['TRIAL_SCHDL_DT_IND']=0
+model.loc[model['TRIAL_SCHDL_DT'].astype('string') != '0001-01-01 00:00:00','TRIAL_SCHDL_DT_IND']=1
+model['TRIAL_SCHDL_DT_IND'].value_counts()
+Out[5]:
+0    17747
+1     3084
+Name: TRIAL_SCHDL_DT_IND, dtype: int64
+In [8]:
+pd.crosstab(model['RPRT_YEAR'],model['TARGET2'])
+Out[8]:
+TARGET2	0	1
+RPRT_YEAR		
+2012	1911	104
+2013	2012	99
+2014	2365	92
+2015	2677	111
+2016	2794	112
+2017	2749	118
+2018	2378	92
+2019	1801	96
+2020	998	51
+2021	256	15
+<-return to TOC
+
+Section 1: Binary model using H2O 
+In [6]:
+from sklearn.metrics import roc_curve, auc
+from sklearn.metrics import average_precision_score
+from sklearn.metrics import precision_recall_curve
+import matplotlib.pyplot as plt
+
+def ROC_AUC(model_name,test_hex, target):
+    # ROC
+    my_result = model_name
+    predictions = my_result.predict(test_hex)
+    
+    #actual = train['TARGET'].as_data_frame()
+    #pred = predictions.as_data_frame()
+    te =  test_hex[target].cbind(predictions).as_data_frame().dropna()
+    fpr = list()
+    tpr = list()
+    roc_auc = list()
+    fpr, tpr, _ = roc_curve(te[target],te['predict'])
+    #fpr, tpr, _ = roc_curve(actual,pred)
+    roc_auc = auc(fpr, tpr)
+    #print('')
+    #print('(i) Area under the curve: {0:0.2f}'.format(roc_auc))
+
+    # Precision-Recall
+    average_precision = average_precision_score(te[target],te['predict'])
+    #print('(ii) Average precision-recall score: {0:0.2f}'.format(average_precision))
+    
+    print('')    
+    print('    * ROC curve: The ROC curve plots true positive rate vs. false positive rate')
+    print('')
+    print('    * The area under the curve (AUC): A value between 0.5 (random) and 1.0 (perfect), measuring the prediction accuracy')
+    print('')
+    print('    * Precision (P) = The number of true positives  / ( the number of true positives + the number of false positives)')
+    print('')
+    print('    * Recall (R) = The number of true positives / (the number of true positives + the number of false negatives)')
+    print('')
+    
+    # plotting_out
+    plt.figure(figsize=(9,3))
+
+    # ROC
+    plt.subplot(1,2,1)
+    plt.plot(fpr, tpr, color='darkorange',lw=2, label='ROC curve (area = %0.2f)' % roc_auc)
+    plt.plot([0, 1], [0, 1], color='navy', lw=3, linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('Receiver operating characteristic: AUC={0:0.2f}'.format(roc_auc))
+    plt.legend(loc="lower right")
+
+    # Precision-Recall
+    plt.subplot(1,2,2)
+    precision, recall, _ = precision_recall_curve(te[target],te['predict'])
+    plt.step(recall, precision, color='b', alpha=0.2, where='post')
+    plt.fill_between(recall, precision, step='post', alpha=0.2, color='b')
+    plt.xlabel('Recall')
+    plt.ylabel('Precision')
+    plt.ylim([0.0, 1.05])
+    plt.xlim([0.0, 1.0])
+    plt.title('Precision-Recall curve: PR={0:0.2f}'.format(average_precision))
+        
+    # Plot the variable importance
+    plt.rcdefaults()
+    fig, ax = plt.subplots(figsize=(5, 6))
+    variables = model_name._model_json['output']['variable_importances']['variable'][0:30]
+    y_pos = np.arange(len(variables))
+    scaled_importance = model_name._model_json['output']['variable_importances']['scaled_importance'][0:30]
+    ax.barh(y_pos, scaled_importance, align='center', color='green', ecolor='black')
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(variables, fontsize=7)
+    ax.invert_yaxis()
+    ax.set_xlabel('Scaled Importance')
+    ax.set_title('Variable Importance')
+    plt.show()
+    
+def gains(model,df_hex,target,seg):
+    y_pred = model.predict(df_hex)
+    y_pred = y_pred.as_data_frame()
+    y_actual = df_hex[target].as_data_frame()
+    data = pd.concat([y_actual,y_pred],axis=1)
+    data.head()
+    data= data.sort_values(by='predict',ascending=False)
+    data['row_id'] = range(0,0+len(data))
+    data['segment'] = ( data['row_id'] / (len(data)/seg) ).astype(int)
+    # Check the count by decile
+    data.loc[data['segment'] == seg]=(seg-1)
+    data['segment'].value_counts()
+
+    #create gains table
+    gains = data.groupby('segment')[target].agg(['count','sum'])
+    gains.columns = ['count','actual - trial track']
+    gains
+
+    #add metrics to the gains table
+    #gains['non_actual'] = gains['count'] - gains['actual']
+    gains['cum_count'] = gains['count'].cumsum()
+    gains['cum_actual'] = gains['actual - trial track'].cumsum()
+    #gains['cum_non_actual'] = gains['non_actual'].cumsum()
+    gains['percent_cum_actual'] = (gains['cum_actual'] / np.max(gains['cum_actual'])).round(2)
+    #gains['percent_cum_non_actual'] = (gains['cum_non_actual'] / np.max(gains['cum_non_actual'])).round(2)
+    gains['if_random'] = np.max(gains['cum_actual']) /seg
+    gains['if_random_cum'] = gains['if_random'].cumsum()
+    gains['actual - settlement'] = gains['count']- gains['actual - trial track']
+    gains['lift'] = (gains['cum_actual'] / gains['if_random_cum']).round(2)
+    #gains['K_S'] = np.abs( gains['percent_cum_actual'] - gains['percent_cum_non_actual'] ) * 100
+    #gains['gain']=(gains['cum_actual']/gains['cum_count']*100).round(2)
+    #gains = pd.DataFrame(gains)
+    gains = gains[['count','if_random','actual - trial track','lift']]
+    return(gains)
+In [7]:
+import h2o
+#h2o.init(nthreads=64)
+#h2o.cluster.shutdown()
+h2o.init(port=543, start_h2o=True, nthreads=64)
+from h2o.estimators.random_forest import H2ORandomForestEstimator #RF
+from h2o.grid.grid_search import H2OGridSearch
+from sklearn.model_selection import train_test_split
+
+# Production dataset
+#train=model.sample(frac=0.8,random_state=10) #random state is a seed value
+#test=model.drop(train.index)
+
+model_hex = h2o.H2OFrame(model)
+train_hex,test_hex, valid = model_hex.split_frame(ratios=  [.8,0.199]) #[.75,0.249])   # [.7,0.299])
+Checking whether there is an H2O instance running at http://localhost:543 ..... not found.
+Attempting to start a local H2O server...
+  Java Version: openjdk version "1.8.0_181"; OpenJDK Runtime Environment (build 1.8.0_181-b13); OpenJDK 64-Bit Server VM (build 25.181-b13, mixed mode)
+  Starting server from /tech/appl/default/user/ck92663e/.conda/envs/h2o/lib/python3.7/site-packages/h2o/backend/bin/h2o.jar
+  Ice root: /data/user/ck92663e/tmp/tmpdjfq5wr7
+  JVM stdout: /data/user/ck92663e/tmp/tmpdjfq5wr7/h2o_ck92663e_started_from_python.out
+  JVM stderr: /data/user/ck92663e/tmp/tmpdjfq5wr7/h2o_ck92663e_started_from_python.err
+  Server is running at http://127.0.0.1:1025
+Connecting to H2O server at http://127.0.0.1:1025 ... successful.
+Warning: Your H2O cluster version is too old (7 months and 7 days)! Please download and install the latest version from http://h2o.ai/download/
+H2O_cluster_uptime:	01 secs
+H2O_cluster_timezone:	America/New_York
+H2O_data_parsing_timezone:	UTC
+H2O_cluster_version:	3.32.1.2
+H2O_cluster_version_age:	7 months and 7 days !!!
+H2O_cluster_name:	H2O_from_python_ck92663e_a3x61z
+H2O_cluster_total_nodes:	1
+H2O_cluster_free_memory:	26.67 Gb
+H2O_cluster_total_cores:	96
+H2O_cluster_allowed_cores:	64
+H2O_cluster_status:	accepting new members, healthy
+H2O_connection_url:	http://127.0.0.1:1025
+H2O_connection_proxy:	{"http": null, "https": null}
+H2O_internal_security:	False
+H2O_API_Extensions:	Amazon S3, XGBoost, Algos, AutoML, Core V3, TargetEncoder, Core V4
+Python_version:	3.7.10 final
+Parse progress: |█████████████████████████████████████████████████████████| 100%
+In [8]:
+MODELVAR = pd.read_pickle('/data/lake/clmds/projects/GL/gl_MODELVAR.pkl')
+MODELVAR = MODELVAR[(~MODELVAR['MODELVAR'].isin( [   
+    'COURT_CNTY_NM',
+    'LOSS_DT_IND',
+    'CASE_PHASE_DESC',
+    'EXPSR_CLOSE_RSN_DESC',
+    'LITIG_RESOL_GOAL_DESC',
+    'COURT_DIST_NM',
+    'EXPSR_OVRRD_CDC_DESC',
+    'CDC_DESC',
+    'LOSS_LOC_ZIP_CD',
+    'RPRT_DT_TO_LOSS_EVENT_SUBRO_OPEN_DT_D',
+    'CLM_LAST_CLS_PAY_INDEM_DT_IND',
+    'CLM_TTL_INC_AMT',
+    'CLM_TTL_INC_AMT_D',
+    'CLM_EXPNS_INC_AMT_D',
+    'CLM_INDEM_INC_AMT_D',
+    'EXPSR_SUBRO_REOPN_DT',
+    'REG_ST_ABBR',
+    'REG_ST_NM',
+    'FNL_SETL_AMT_D',
+    'FNL_SETL_DT_IND',
+    'LAST_DMND_AMT_D',
+    'LAST_OFFER_AMT_D',
+    'HR_HANR_TEAM_NM',
+    'HR_HANR_EMPLYE_NUM',
+    'DED_AMT',
+    'HR_HNDLR_JOB_TITLE_DESC',
+    'AUTOMBL_CLR_LIAB_IND',
+    'LOSS_LOC_CITY_NM',
+    'LITIG_STTS_END_DT_IND',
+    'EXPSR_FIRST_INDEM_PD_DT_IND',
+    'ORIG_CLM_OFF_CD',
+    'HR_HANR_DEP_NM',
+    'HR_HANR_OFF_NM',
+    'HR_HANR_GRP_NM',
+    'LOSS_EVNT_DESC',
+    'PLNTIF_LOSS_LIAB_PCT_D',
+    'CSL_AMT_D',
+    'DED_AMT_D',
+    'LOSS_YEAR_D',
+    'SETTLMNT_AUTH_TXT',
+    'OFFER_CNT'
+    ] ) ) 
+  #  & (MODELVAR['VARGRP']!='DATE')
+  #  & (MODELVAR['VARGRP']!='AMT')
+    & (~MODELVAR['MODELVAR'].str.contains('RPRT_', regex=False) )
+    ]
+
+#predictors = MODELVAR['MODELVAR'].to_list() + ['CLM_CNTR_CONV_IND','RPRT_YEAR']
+predictors = list(set(model.columns) - set(['TARGET2','TARGET','RESOLUTION',
+ 'RESOLUTION_TYPE_DESC', 'RESOLUTION_OUTCOME_DESC', 'HANR_FULL_NM', 'HR_HANR_EMPLYE_NUM',
+ 'SPVSR_FULL_NM','SNAPSHOT_DATE_PK_ID','LITIG_RESOL_GOAL_DESC','COURT_DIST_NM','CASE_PHASE_DESC',
+ 'HR_HANR_GRP_NM','HR_HANR_TEAM_NM',  'LOW_END_LPE_TTL_APRS_DMG_AMT','LOW_END_LPE_TTL_ADJ_DMG_AMT',
+'HIGH_END_LPE_TTL_ADJ_DMG_AMT',
+ 'HIGH_END_LPE_AUTH_APPRV_AMT',
+ 'HIGH_END_LPE_EST_SETL_AMT',
+ 'HIGH_END_LPE_FINAL_ADJ_AMT',
+ 'HIGH_END_LPE_RTO_AMT',
+ 'HIGH_END_LPE_TTL_ADJS_AMT',
+ 'HIGH_END_LPE_TTL_APRS_DMG_AMT',
+ 'LOW_END_LPE_AUTH_APPRV_AMT',
+ 'LOW_END_LPE_EST_SETL_AMT',
+ 'LOW_END_LPE_FINAL_ADJ_AMT',
+ 'LOW_END_LPE_RTO_AMT',
+ 'LOW_END_LPE_TTL_ADJ_DMG_AMT',
+ 'LOW_END_LPE_TTL_ADJS_AMT',
+ 'LOW_END_LPE_TTL_APRS_DMG_AMT',
+ 'LPE_NEGOT_SETL_AMT'
+                                           ]))
+<-return to TOC
+
+Section 1.1: Variable selection using H2O 
+In [9]:
+i = 2012
+target     = 'TARGET2'
+
+h2o_gl_trial_init = H2ORandomForestEstimator(
+    model_id="h2o_auto_trial_init",
+    ntrees=400, # [100,200,300,400,500,600]
+    min_rows = 20, #[10,20,30]
+    max_depth = 8, # [ 5,8,10,12,14,16]
+    stopping_rounds=2,
+    score_each_iteration=True,
+    stopping_metric='mse',
+    nfolds=10,
+    balance_classes=True,
+    seed=123)
+h2o_gl_trial_init.train(predictors, target, training_frame=train_hex[train_hex['RPRT_YEAR']>=i])
+ROC_AUC(h2o_gl_trial_init,test_hex[test_hex['RPRT_YEAR']>=i],'TARGET2')
+gains(h2o_gl_trial_init,test_hex[test_hex['RPRT_YEAR']>=i],'TARGET2',10)
+
+# save the model
+#model_path = h2o.save_model(model=h2o_gl_trial_init, path="/data/lake/clmds/projects/GL/", force=True)
+#print(model_path)
+#gains(h2o_gl_trial_init,test_hex,'TARGET2',10)
+drf Model Build progress: |███████████████████████████████████████████████| 100%
+drf prediction progress: |████████████████████████████████████████████████| 100%
+
+    * ROC curve: The ROC curve plots true positive rate vs. false positive rate
+
+    * The area under the curve (AUC): A value between 0.5 (random) and 1.0 (perfect), measuring the prediction accuracy
+
+    * Precision (P) = The number of true positives  / ( the number of true positives + the number of false positives)
+
+    * Recall (R) = The number of true positives / (the number of true positives + the number of false negatives)
+
+
+
+drf prediction progress: |████████████████████████████████████████████████| 100%
+Out[9]:
+count	if_random	actual - trial track	lift
+segment				
+0	405	16.4	73	4.45
+1	405	16.4	18	2.77
+2	405	16.4	13	2.11
+3	405	16.4	11	1.75
+4	405	16.4	12	1.55
+5	405	16.4	3	1.32
+6	405	16.4	24	1.34
+7	405	16.4	3	1.20
+8	405	16.4	0	1.06
+9	405	16.4	7	1.00
+In [10]:
+
+
+h2o_gl_trial_init._model_json['output']['variable_importances']['variable'][1:100]
+Out[10]:
+['EXPSR_CLOSE_RSN_DESC',
+ 'LOSS_LOC_ST_ABBR',
+ 'TEXT_VERDICT_GL',
+ 'TRIAL_SCHDL_DT_IND',
+ 'MNGR_FULL_NM',
+ 'CLM_OVRRD_CDC_DESC',
+ 'EXPSR_OVRRD_CDC_DESC',
+ 'TRIAL_SCHDL_DT',
+ 'INJ_TYP_DESC',
+ 'COURT_TYPE',
+ 'BODY_PART_SBTYP_DESC',
+ 'COV_TYP_ABBR',
+ 'HR_HANR_DEP_NM',
+ 'BODY_PART_DESC',
+ 'CDC_DESC',
+ 'REG_ST_ABBR',
+ 'PLNTF_AVG_DMND_CNT',
+ 'CLM_INDEM_INC_AMT_D',
+ 'INSRD_FLT_PCT',
+ 'TEXT_VOIR_DIRE_GL',
+ 'REG_ST_NM',
+ 'EXPSR_FRST_CLS_PAY_INDEM_DT',
+ 'CLM_PLNTIF_ATTY_REP_IND',
+ 'RPRT_TO_CLM_FRST_CLS_DT_D',
+ 'RPRT_TO_CLM_LATST_RSRV_TRANS_DT',
+ 'CASE_CLOSED_DT',
+ 'RPRT_TO_EXPSR_LATST_RSRV_TRANS_DT_D',
+ 'RPRT_TO_ORIG_CASE_CLOSED_DT_D',
+ 'COV_TYP_DESC',
+ 'OTH_DEFND_LOSS_LIAB_PCT',
+ 'SETL_AUTH_DT',
+ 'MSE_DESC',
+ 'CLM_INDEM_INC_AMT_EARLIEST_D',
+ 'CLM_EXPNS_INC_AMT_D',
+ 'LAST_DMND_AMT_D',
+ 'RPRT_TO_CLM_LAST_CLS_DT_D',
+ 'HIGH_END_TTL_PN_SUFR_AMT',
+ 'TEXT_MOTIONS_IN_LIMINE_GL',
+ 'RPRT_TO_ORIG_CASE_RCVD_DT_D',
+ 'LITIGATION_TYPE',
+ 'RPRT_TO_CASE_RCVD_DT_D',
+ 'CLM_INDEM_INC_AMT_SF_D',
+ 'INSRD_FLT_PCT_D',
+ 'FIRST_DEMAND_OFFER_GAP_D',
+ 'HIGH_END_PN_SUFR_RECOM_AMT',
+ 'LOW_END_PN_SUFR_WO_CAUSE_AMT',
+ 'CLM_PLNTIF_ATTY_FIRST_REP_DT',
+ 'CASE_GID',
+ 'CLM_PCNSL_SIGN_HOLD_HRMLS_IND',
+ 'HR_HANR_OFF_NM',
+ 'CLM_PLNTIF_INVOLV_START_DT',
+ 'RPRT_TO_CLM_LATST_RSRV_TRANS_DT_D',
+ 'ORIG_CASE_RCVD_DT',
+ 'RPRT_TO_CASE_CLOSED_DT_D',
+ 'RPRT_TO_CLM_HNDLR_ASSGN_DT_D',
+ 'LOSS_EVENT_FAULT_RATE_DESC',
+ 'LOSS_RPRT_LAG_AGE_D',
+ 'HGH_END_INJ_IS_PN_SFR_APV_AMT',
+ 'ORIG_CLM_OFF_CD',
+ 'OFFER_CNT',
+ 'CLM_EXPNS_INC_AMT',
+ 'MEDICARE_RECIPIENT_IND',
+ 'MO_END_SNPSHT_DT_PK_ID_EAR_D',
+ 'CLM_INDEM_INC_AMT_A',
+ 'CLM_OTH_LIEN_REL_IND',
+ 'DW_LST_UPD_TMSP',
+ 'PURE_EXPSR_HIGH_NUM_D',
+ 'FIRST_OFFER_AMT_D',
+ 'CLM_RPRT_BY_DESC',
+ 'CLM_TTL_INC_AMT_D',
+ 'CLM_EXPNS_INC_AMT_A',
+ 'CASE_RCVD_DT',
+ 'RPRT_TO_LOSS_EVNT_OPEN_DT_D',
+ 'RPRT_TO_ORIG_CASE_RCVD_DT',
+ 'RPRT_TO_LOSS_DT_D',
+ 'HR_HNDLR_JOB_TITLE_DESC',
+ 'NEGOTN_MADE_TS',
+ 'CLM_LATST_RSRV_TRANS_DT',
+ 'LOW_END_TTL_GENL_DMG_NEGT_AMT',
+ 'CASE_ALLEGATION_DESC',
+ 'DMND_CNT',
+ 'RPRT_TO_ORIG_CASE_CLOSED_DT',
+ 'PLNTIF_LOSS_LIAB_PCT',
+ 'DMND_CNT_D',
+ 'LAST_OFFER_AMT_D',
+ 'LOSS_EVNT_OPEN_DT',
+ 'CLM_PK_ID',
+ 'LIAB_ADJ_PURE_EXPSR_LOW_NUM_D',
+ 'LOW_END_TTL_PN_SUFR_AMT',
+ 'CLM_FRST_CLS_DT',
+ 'CLMNT_TYP_CD',
+ 'RPRT_TO_SETL_AUTH_DT',
+ 'RPRT_TO_EXPSR_HNDLR_ASSGN_DT_D',
+ 'DED_AMT',
+ 'LATST_OFFER_DT',
+ 'CLM_EXPNS_INC_AMT_SF_D',
+ 'LOW_END_LPE_RNG_PCT_D',
+ 'EXPSR_PLNTIF_INVOLV_START_DT',
+ 'RPRT_TO_EXPNS_STTS_DT']
+In [11]:
+def CM(model,df_hex,target):
+    from sklearn.metrics import confusion_matrix
+    y_actual = df_hex[target].as_data_frame()
+    pred = model.predict(df_hex)
+    pred = pred.as_data_frame()
+    pred_quantile = pred['predict'].quantile([0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1])
+    pred['pred'] = 0
+    cut = y_actual.mean()[0]
+    cut = 0.015
+    pred[pred['predict'] < cut ] = 1
+    y_pred = pred['pred']
+    CM = pd.DataFrame(confusion_matrix( y_pred,y_actual), columns = ['Actual - Settlement', 'Actual - Trial'], index=['Prediction - Settlement','Prediction - Trial'])
+    
+    return(CM, pred_quantile)
+    
+
+i = 2012
+target = 'TARGET2'
+CM, pred_quantile = CM(h2o_gl_trial_init,test_hex[test_hex['RPRT_YEAR']>=i],'TARGET2')
+CM
+drf prediction progress: |████████████████████████████████████████████████| 100%
+Out[11]:
+Actual - Settlement	Actual - Trial
+Prediction - Settlement	2359	132
+Prediction - Trial	1527	32
+In [12]:
+# Variables by importance
+#h2o_gl_trial_init._model_json['output']['variable_importances'].as_data_frame().to_csv('/data/lake/clmds/projects/GL/for_legal.csv')
+H2O_selectedVars_init = h2o_gl_trial_init._model_json['output']['variable_importances']['variable'][0:500]
+scaled_importance_init = h2o_gl_trial_init._model_json['output']['variable_importances']['scaled_importance'][0:500]
+#H2O_selectedVars_init
+<-return to TOC
+
+Section 1.2: Manually review the variables 
+In [13]:
+H2O_selectedVars_init =['CLM_OVRRD_CDC_DESC',
+'NON_ZERO_LIAB_PRTY_COUNT_D',
+ 'LOSS_LOC_ST_ABBR',
+ 'TRIAL_SCHDL_DT_IND',
+ 'TEXT_PRETRIAL_REPORT',
+ 'INJ_TYP_DESC',
+ 'BODY_PART_SBTYP_DESC',
+ 'HIGH_END_TTL_PN_SUFR_AMT',
+ 'BODY_PART_DESC',
+ 'RPRT_TO_EXPSR_EXPNS_STTS_DT_D',
+ 'CLM_INDEM_INC_AMT_SF_D',
+ #'RPRT_TO_LOSS_DT_D',
+ 'LOSS_RPRT_LAG_AGE_D',
+ 'COV_TYP_DESC',
+ #'RPRT_TO_SUIT_CRT_DT_D',
+ 'RPRT_TO_CASE_RCVD_DT_D',
+ 'HIGH_END_PN_SUFR_RECOM_AMT',
+ 'FIRST_DEMAND_OFFER_GAP_D',
+ 'CLM_CNTR_CONV_IND',
+# 'RPRT_TO_LOSS_EVNT_OPEN_DT_D',
+# 'RPRT_TO_ORIG_CASE_RCVD_DT_D',
+ 'LOSS_CS_DESC',
+ 'INSURED_LIAB_PCT_D',
+ 'HIGH_END_PN_SUFR_RECOM_AMT_D'
+                       ]
+    
+z = model[H2O_selectedVars_init].dtypes
+var_CAT = z.index[z=='O']
+var_NUM = z.index[z!='O']
+In [14]:
+predictors = H2O_selectedVars_init
+
+target     = 'TARGET2'
+
+h2o_gl_trial_init = H2ORandomForestEstimator(
+    model_id="h2o_gl_trial_init",
+    ntrees=100,
+    min_rows = 20,
+    stopping_rounds=2,
+    score_each_iteration=True,
+    stopping_metric='mse',
+    nfolds=10,
+    balance_classes=True,
+    seed=1234)
+h2o_gl_trial_init.train(predictors, target, training_frame=train_hex)
+ROC_AUC(h2o_gl_trial_init,test_hex,'TARGET2')
+gains(h2o_gl_trial_init,test_hex,'TARGET2',10)
+
+# save the model
+#model_path = h2o.save_model(model=h2o_gl_trial_init, path="/data/lake/clmds/projects/GL/", force=True)
+#print(model_path)
+#gains(h2o_auto_trial,test_hex,'TARGET2',10)
+drf Model Build progress: |███████████████████████████████████████████████| 100%
+drf prediction progress: |████████████████████████████████████████████████| 100%
+
+    * ROC curve: The ROC curve plots true positive rate vs. false positive rate
+
+    * The area under the curve (AUC): A value between 0.5 (random) and 1.0 (perfect), measuring the prediction accuracy
+
+    * Precision (P) = The number of true positives  / ( the number of true positives + the number of false positives)
+
+    * Recall (R) = The number of true positives / (the number of true positives + the number of false negatives)
+
+
+
+drf prediction progress: |████████████████████████████████████████████████| 100%
+Out[14]:
+count	if_random	actual - trial track	lift
+segment				
+0	405	16.4	49	2.99
+1	405	16.4	29	2.38
+2	405	16.4	13	1.85
+3	405	16.4	16	1.63
+4	405	16.4	15	1.49
+5	405	16.4	11	1.35
+6	405	16.4	10	1.25
+7	405	16.4	5	1.13
+8	405	16.4	4	1.03
+9	405	16.4	12	1.00
+In [15]:
+h2o_gl_trial_init._model_json['output']['variable_importances']['variable']
+Out[15]:
+['CLM_OVRRD_CDC_DESC',
+ 'LOSS_LOC_ST_ABBR',
+ 'TRIAL_SCHDL_DT_IND',
+ 'INJ_TYP_DESC',
+ 'BODY_PART_SBTYP_DESC',
+ 'RPRT_TO_EXPSR_EXPNS_STTS_DT_D',
+ 'LOSS_RPRT_LAG_AGE_D',
+ 'BODY_PART_DESC',
+ 'RPRT_TO_CASE_RCVD_DT_D',
+ 'COV_TYP_DESC',
+ 'CLM_INDEM_INC_AMT_SF_D',
+ 'FIRST_DEMAND_OFFER_GAP_D',
+ 'HIGH_END_PN_SUFR_RECOM_AMT',
+ 'LOSS_CS_DESC',
+ 'NON_ZERO_LIAB_PRTY_COUNT_D',
+ 'HIGH_END_TTL_PN_SUFR_AMT',
+ 'INSURED_LIAB_PCT_D',
+ 'HIGH_END_PN_SUFR_RECOM_AMT_D',
+ 'TEXT_PRETRIAL_REPORT',
+ 'CLM_CNTR_CONV_IND']
+<-return to TOC
+
+Section 1.3: Categorical variable grouping 
+Take the first 100 variables. This is the primary reason causing the drop in the PR and Lift.
+In [16]:
+# VarNunique = pd.DataFrame(columns = ['Var', 'Nunique'])
+# for i in var_CAT:
+#     to_append = [i, model[i].nunique()]
+#     to_append = pd.Series(to_append, index = VarNunique.columns)
+#     VarNunique = VarNunique.append(to_append, ignore_index=True)
+#     
+# VarNunique
+In [17]:
+# Get the categorical variables for feature engineering
+V = pd.DataFrame(columns = ['Var', 'count','mean'])
+var_CAT = ['CLM_OVRRD_CDC_DESC','BODY_PART_DESC','BODY_PART_SBTYP_DESC','INJ_TYP_DESC','LOSS_LOC_ST_ABBR','COV_TYP_DESC','LOSS_CS_DESC']
+for i in var_CAT:
+    to_append = model.groupby(i)['TARGET'].agg(['count','mean']).reset_index()
+    to_append.columns = ['Category', 'count','mean']
+    to_append['Var'] = i
+    V = V.append(to_append, ignore_index=True)
+    
+V = V[['Var','Category','count','mean']]
+V.to_csv('/data/lake/clmds/projects/GL/var_CAT.csv')
+
+d = model.groupby(['INJ_TYP_DESC','COV_TYP_DESC'])['TARGET'].agg(['count','mean']).reset_index()
+d.to_csv('/data/lake/clmds/projects/GL/var_CAT_injury_and_coverage.csv')
+    
+# There are four fields in the HR table. Use "HR_HANR_GRP_NM"
+# w1= model['HR_HANR_OFF_NM'].value_counts().reset_index() # LABILITY MAJOR CASE
+# w2 = model['HR_HANR_TEAM_NM'].value_counts().reset_index() # LIABILITY EAST TEAM - MAJOR CASE, LIABILITY WEST TEAM - MAJOR CASE
+# w3 = model['HR_HANR_DEP_NM'].value_counts().reset_index()
+# w4= model['HR_HANR_GRP_NM'].value_counts().reset_index() # LIABILITY EAST TEAM - MAJOR CASE, LIABILITY WEST TEAM - MAJOR CASE, AI/PI EMERGING ISSUES
+<-return to TOC
+
+Section 1.4: H2O model with grouped categorical variables 
+Take the first 100 variables. This is the primary reason causing the drop in the PR and Lift.
+In [18]:
+model['LOSS_LOC_ST_ABBR1'] = model['LOSS_LOC_ST_ABBR']
+In [19]:
+gl_cat_fe = pd.read_csv('/data/lake/clmds/projects/GL/GL Categorical Variables.csv')
+gl_cat_fe = gl_cat_fe[~gl_cat_fe['Var'].isnull()]
+newvar_list = gl_cat_fe['Var'].unique()
+NEWVAR = MODELVAR[MODELVAR['COLUMN'].isin(newvar_list)]
+NEWVAR['MODELVAR'] = NEWVAR['COLUMN'] +'_D'
+MODELVAR = pd.concat([MODELVAR,NEWVAR], axis=0)
+
+for ind in gl_cat_fe.index:
+    Var = gl_cat_fe['Var'][ind]
+    #print(Var)
+    NewVar = gl_cat_fe['New_Var'][ind]
+    Category = gl_cat_fe['Category'][ind]
+    Combined_Category = gl_cat_fe['Combined_Category'][ind]
+    model.loc[model[Var]==Category, NewVar] = Combined_Category
+    model.loc[model[NewVar].isnull(),NewVar] = 'NoData'
+In [20]:
+predictors = [
+    'NON_ZERO_LIAB_PRTY_COUNT_D',
+'CLM_OVRRD_CDC_DESC_D',
+ 'LOSS_LOC_ST_ABBR_D',
+ 'LOSS_RPRT_LAG_AGE_D',
+ 'BODY_PART_DESC_D',
+ 'RPRT_TO_CASE_RCVD_DT_D',
+ 'TEXT_VERDICT_GL',
+ 'INJ_TYP_DESC_D',
+ 'RPRT_TO_EXPSR_EXPNS_STTS_DT_D',
+ 'COV_TYP_DESC_D',
+ 'CLM_INDEM_INC_AMT_SF_D',
+ 'FIRST_DEMAND_OFFER_GAP_D',
+ 'LOSS_CS_DESC_D',
+ 'TEXT_VOIR_DIRE_GL',
+ 'TEXT_PRETRIAL_REPORT',
+ 'BODY_PART_SBTYP_DESC_D',
+ 'CLM_EXPNS_INC_AMT_SF_A',
+ 'FIRST_OFFER_AMT_D',
+ 'OFFER_CNT_D',
+ 'DMND_CNT_D',
+ 'VENUE_RATING_FINAL',
+ 'LOW_END_AUTH_APPRV_AMT_D',
+ 'RPRT_YEAR',
+ 'TEXT_MOTIONS_IN_LIMINE_GL',
+ 'HIGH_END_PN_SUFR_RECOM_AMT_D',
+ 'CLM_CNTR_CONV_IND',
+ 'RISK_TRNSFR_IND',
+ 'LOSS_EVENT_FAULT_RATE_DESC',
+ 'FIRST_DEMAND_LMT_RATIO_D',
+ 'INSURED_LIAB_PCT_D',
+ 'INSRD_FLT_PCT_D',
+     'HIGH_END_LPE_TTL_ADJ_DMG_AMT_D',
+ 'HIGH_END_LPE_AUTH_APPRV_AMT_D',
+ 'HIGH_END_LPE_EST_SETL_AMT_D',
+ 'HIGH_END_LPE_FINAL_ADJ_AMT_D',
+ 'HIGH_END_LPE_RNG_PCT_D',
+ 'HIGH_END_LPE_RTO_AMT_D',
+ 'HIGH_END_LPE_TTL_ADJS_AMT_D',
+ 'HIGH_END_LPE_TTL_APRS_DMG_AMT_D',
+ 'LOW_END_LPE_AUTH_APPRV_AMT_D',
+ 'LOW_END_LPE_EST_SETL_AMT_D',
+ 'LOW_END_LPE_FINAL_ADJ_AMT_D',
+ 'LOW_END_LPE_RNG_PCT_D',
+ 'LOW_END_LPE_RTO_AMT_D',
+ 'LOW_END_LPE_TTL_ADJ_DMG_AMT_D',
+ 'LOW_END_LPE_TTL_ADJS_AMT_D',
+ 'LOW_END_LPE_TTL_APRS_DMG_AMT_D',
+ 'LPE_NEGOT_SETL_AMT_D',
+ 'LMT_D',
+ 'HIGH_END_TTL_PN_SUFR_AMT_D',
+ 
+             ]
+
+target     = 'TARGET2'
+
+model_hex = h2o.H2OFrame(model)
+train_hex,test_hex, valid = model_hex.split_frame(ratios=[.8,0.199])
+
+h2o_gl_trial = H2ORandomForestEstimator(
+    model_id="h2o_gl_trial",
+    ntrees=400, # [100,200,300,400,500,600]
+    min_rows = 10, #[10,20,30]
+    max_depth = 10, # [ 5,8,10,12,14,16]
+    stopping_rounds=2,
+    score_each_iteration=True,
+    stopping_metric='mse',
+    nfolds=10,
+    balance_classes=True,
+    seed=124)
+h2o_gl_trial.train(predictors, target, training_frame=train_hex)
+ROC_AUC(h2o_gl_trial,test_hex,'TARGET2')
+gains(h2o_gl_trial,test_hex,'TARGET2',10)
+
+
+
+# save the model
+#model_path = h2o.save_model(model=h2o_gl_trial, path="/data/lake/clmds/projects/GL/", force=True)
+#print(model_path)
+Parse progress: |█████████████████████████████████████████████████████████| 100%
+drf Model Build progress: |███████████████████████████████████████████████| 100%
+drf prediction progress: |████████████████████████████████████████████████| 100%
+
+    * ROC curve: The ROC curve plots true positive rate vs. false positive rate
+
+    * The area under the curve (AUC): A value between 0.5 (random) and 1.0 (perfect), measuring the prediction accuracy
+
+    * Precision (P) = The number of true positives  / ( the number of true positives + the number of false positives)
+
+    * Recall (R) = The number of true positives / (the number of true positives + the number of false negatives)
+
+
+
+drf prediction progress: |████████████████████████████████████████████████| 100%
+Out[20]:
+count	if_random	actual - trial track	lift
+segment				
+0	408	17.2	70	4.07
+1	407	17.2	26	2.79
+2	408	17.2	11	2.07
+3	407	17.2	14	1.76
+4	408	17.2	15	1.58
+5	407	17.2	10	1.41
+6	408	17.2	7	1.27
+7	407	17.2	8	1.17
+8	408	17.2	9	1.10
+9	407	17.2	2	1.00
+In [21]:
+z = model[predictors].dtypes
+var_CAT = z.index[z=='O']
+var_NUM = z.index[z!='O']
+In [22]:
+h2o_gl_trial._model_json['output']['variable_importances']['variable']
+Out[22]:
+['LOSS_LOC_ST_ABBR_D',
+ 'CLM_OVRRD_CDC_DESC_D',
+ 'RPRT_TO_CASE_RCVD_DT_D',
+ 'LOSS_RPRT_LAG_AGE_D',
+ 'INJ_TYP_DESC_D',
+ 'RPRT_TO_EXPSR_EXPNS_STTS_DT_D',
+ 'BODY_PART_DESC_D',
+ 'TEXT_VERDICT_GL',
+ 'COV_TYP_DESC_D',
+ 'BODY_PART_SBTYP_DESC_D',
+ 'CLM_INDEM_INC_AMT_SF_D',
+ 'TEXT_MOTIONS_IN_LIMINE_GL',
+ 'NON_ZERO_LIAB_PRTY_COUNT_D',
+ 'TEXT_VOIR_DIRE_GL',
+ 'OFFER_CNT_D',
+ 'LOSS_EVENT_FAULT_RATE_DESC',
+ 'VENUE_RATING_FINAL',
+ 'LOSS_CS_DESC_D',
+ 'INSURED_LIAB_PCT_D',
+ 'CLM_EXPNS_INC_AMT_SF_A',
+ 'FIRST_DEMAND_OFFER_GAP_D',
+ 'INSRD_FLT_PCT_D',
+ 'DMND_CNT_D',
+ 'RPRT_YEAR',
+ 'FIRST_DEMAND_LMT_RATIO_D',
+ 'LOW_END_AUTH_APPRV_AMT_D',
+ 'FIRST_OFFER_AMT_D',
+ 'HIGH_END_TTL_PN_SUFR_AMT_D',
+ 'TEXT_PRETRIAL_REPORT',
+ 'LMT_D',
+ 'RISK_TRNSFR_IND',
+ 'HIGH_END_PN_SUFR_RECOM_AMT_D',
+ 'LOW_END_LPE_RNG_PCT_D',
+ 'HIGH_END_LPE_TTL_ADJ_DMG_AMT_D',
+ 'HIGH_END_LPE_RNG_PCT_D',
+ 'HIGH_END_LPE_TTL_APRS_DMG_AMT_D',
+ 'CLM_CNTR_CONV_IND',
+ 'HIGH_END_LPE_EST_SETL_AMT_D',
+ 'LOW_END_LPE_TTL_ADJS_AMT_D',
+ 'LOW_END_LPE_FINAL_ADJ_AMT_D',
+ 'LOW_END_LPE_TTL_ADJ_DMG_AMT_D',
+ 'HIGH_END_LPE_AUTH_APPRV_AMT_D',
+ 'LOW_END_LPE_EST_SETL_AMT_D',
+ 'HIGH_END_LPE_FINAL_ADJ_AMT_D',
+ 'HIGH_END_LPE_RTO_AMT_D',
+ 'HIGH_END_LPE_TTL_ADJS_AMT_D',
+ 'LOW_END_LPE_AUTH_APPRV_AMT_D',
+ 'LOW_END_LPE_RTO_AMT_D',
+ 'LOW_END_LPE_TTL_APRS_DMG_AMT_D',
+ 'LPE_NEGOT_SETL_AMT_D']
+In [23]:
+model[model['TEXT_VOIR_DIRE_GL']=='Y']['TARGET2'].value_counts()
+
+pd.crosstab(model['TEXT_VOIR_DIRE_GL'],model['TARGET2'])
+Out[23]:
+TARGET2	0	1
+TEXT_VOIR_DIRE_GL		
+NoData	19879	859
+Y	62	31
+In [24]:
+
+
+model.to_pickle('/data/lake/clmds/projects/GL/gl_lit_formodeling.pkl')
+<-return to TOC
+
+Section 1.5: XGB
+In [28]:
+from h2o.estimators import H2OXGBoostEstimator
+target     = 'TARGET2'
+h2o_xgb_gl_trial = H2OXGBoostEstimator(booster='dart',
+                                  normalize_type="tree",
+                                  nfolds=10, 
+                                  ntrees = 5000,
+                                  max_depth = 6,
+                                  learn_rate = 0.3,                
+                                  stopping_metric='AUTO',
+                                  seed=1234)
+#h2o_xgb_gl_trial.train(predictors, target, training_frame=train_hex)
+#ROC_AUC(h2o_xgb_gl_trial,test_hex,'TARGET2')
+#gains(h2o_xgb_gl_trial,test_hex,'TARGET2',10)
+<-return to TOC
+
+Section 1.6: Create Weight-of-evidence variables
+Reasons for more feature engineering:
+
+Several categorical variables have too many levels (high dimensionality) or suffer high-cardinality
+With the small number of observations and small target count, the high dimensionality makes a variable overfitting the training data and incapable in the test data.
+Transform the high-dimensional variables to continuous variables to perserve their predictability.
+It is a numerical value ranging from 0 to 100. 0 - very likely to settle, 100 - very likely to go to trial
+Techniques for the feature engineering:
+
+Weight of evidence: here
+Use 80% of the data for training, keeping the 20% strictly untouched.
+Over-sample the target in the 80% training data. Experiment the over-sampling ratio. If the ratio is too high, the predictability drops.
+In [327]:
+from sklearn.model_selection import train_test_split
+model = pd.read_pickle('/data/lake/clmds/projects/GL/gl_lit_formodeling.pkl')
+
+# keep the test set untouched. The train and test sets are for model building. 
+train, test = train_test_split(model, test_size = 0.3, random_state = 10) #1034 # We have tested 0.3, 0.25 as well
+
+# Oversample the training set to create WOE variables.
+m0 = train[train['TARGET2']==0]
+m1 = train[train['TARGET2']==1]
+m1 = m1.sample(frac=5, replace=True, random_state=1)  # Over-sampling rate = 1,1.5, 2
+oversampled_train_FE = pd.concat([m0,m1],axis=0)
+oversampled_train_FE['TARGET2'].value_counts()
+Out[327]:
+0    13963
+1     3090
+Name: TARGET2, dtype: int64
+In [328]:
+train['HIGH_END_PN_SUFR_RECOM_AMT_D'].value_counts()
+Out[328]:
+z - NoData         8341
+a - 0              4911
+i - 15001+          475
+f - 1801-5000       271
+h - 10001-15000     191
+g - 5001-7500       155
+h - 7501-10000      131
+e - 1-1800          106
+Name: HIGH_END_PN_SUFR_RECOM_AMT_D, dtype: int64
+In [329]:
+var_CAT
+Out[329]:
+Index(['NON_ZERO_LIAB_PRTY_COUNT_D', 'CLM_OVRRD_CDC_DESC_D',
+       'LOSS_LOC_ST_ABBR_D', 'LOSS_RPRT_LAG_AGE_D', 'BODY_PART_DESC_D',
+       'RPRT_TO_CASE_RCVD_DT_D', 'TEXT_VERDICT_GL', 'INJ_TYP_DESC_D',
+       'RPRT_TO_EXPSR_EXPNS_STTS_DT_D', 'COV_TYP_DESC_D',
+       'CLM_INDEM_INC_AMT_SF_D', 'FIRST_DEMAND_OFFER_GAP_D', 'LOSS_CS_DESC_D',
+       'TEXT_VOIR_DIRE_GL', 'TEXT_PRETRIAL_REPORT', 'BODY_PART_SBTYP_DESC_D',
+       'CLM_EXPNS_INC_AMT_SF_A', 'FIRST_OFFER_AMT_D', 'OFFER_CNT_D',
+       'DMND_CNT_D', 'VENUE_RATING_FINAL', 'LOW_END_AUTH_APPRV_AMT_D',
+       'TEXT_MOTIONS_IN_LIMINE_GL', 'HIGH_END_PN_SUFR_RECOM_AMT_D',
+       'CLM_CNTR_CONV_IND', 'RISK_TRNSFR_IND', 'LOSS_EVENT_FAULT_RATE_DESC',
+       'FIRST_DEMAND_LMT_RATIO_D', 'INSURED_LIAB_PCT_D', 'INSRD_FLT_PCT_D',
+       'HIGH_END_LPE_TTL_ADJ_DMG_AMT_D', 'HIGH_END_LPE_AUTH_APPRV_AMT_D',
+       'HIGH_END_LPE_EST_SETL_AMT_D', 'HIGH_END_LPE_FINAL_ADJ_AMT_D',
+       'HIGH_END_LPE_RNG_PCT_D', 'HIGH_END_LPE_RTO_AMT_D',
+       'HIGH_END_LPE_TTL_ADJS_AMT_D', 'HIGH_END_LPE_TTL_APRS_DMG_AMT_D',
+       'LOW_END_LPE_AUTH_APPRV_AMT_D', 'LOW_END_LPE_EST_SETL_AMT_D',
+       'LOW_END_LPE_FINAL_ADJ_AMT_D', 'LOW_END_LPE_RNG_PCT_D',
+       'LOW_END_LPE_RTO_AMT_D', 'LOW_END_LPE_TTL_ADJ_DMG_AMT_D',
+       'LOW_END_LPE_TTL_ADJS_AMT_D', 'LOW_END_LPE_TTL_APRS_DMG_AMT_D',
+       'LPE_NEGOT_SETL_AMT_D', 'LMT_D', 'HIGH_END_TTL_PN_SUFR_AMT_D'],
+      dtype='object')
+In [330]:
+#######################
+# My Function for WOE #
+#######################
+def normalizeData(x): # Scale each WOE to 0 to 100
+        return ( (x - np.min(x)) / (np.max(x) - np.min(x)) ) * 100
+    
+def WOE(df, var):
+    # Create the Weight of evidence variable
+    df[var] = df[var].fillna('NoData')
+    woe_df = df[[var,'TARGET2']].groupby(var)['TARGET2'].agg(['count','sum']).reset_index()
+    woe_df.columns = [var,'Count','Good']
+    woe_df['Bad'] = woe_df['Count'] - woe_df['Good']
+    woe_df['Good %'] = (woe_df['Good'] / woe_df['Good'].sum()*100).round(2)
+    woe_df['Bad %'] = (woe_df['Bad'] / woe_df['Bad'].sum()*100).round(2)
+    woe_df['Good %'] = np.maximum(woe_df['Good %'], 0.001)
+    woe_df['Bad %'] = np.maximum(woe_df['Bad %'], 0.001)
+    woe_df[var+'_WOE'] = np.log(woe_df['Good %'] / woe_df['Bad %']).round(2)
+    woe_df[var+'_WOE'] =  (woe_df[var+'_WOE'] - np.min(woe_df[var+'_WOE'])) / ( np.max(woe_df[var+'_WOE']) - np.min(woe_df[var+'_WOE']) ) * 100
+    woe_df = woe_df[[var+'_WOE', var]]
+    woe_df = woe_df.sort_values(by=var+'_WOE')
+    
+    return woe_df
+
+def append_WOE(woe_df,var,df):
+    # Merge back to the destined data
+    df = df.merge(woe_df,left_on=var,right_on=var,how='left')
+    df[var]
+    return(df)
+
+# List the categorical variables to create th WOEs
+for_WOE_list= var_CAT
+
+WOE_list = [s + '_WOE' for s in for_WOE_list]
+WOE_DF= {}
+for var, woe in zip(for_WOE_list, WOE_list):
+    # Put all the woe dataframes in a dictionary
+    WOE_DF[woe] = WOE(oversampled_train_FE, var)
+    WOE_DF[woe].to_pickle('/data/lake/clmds/projects/GL/gl_train_WOE_'+var+'.pkl')
+    # Append the woes to the train and test sets
+    train = append_WOE(WOE_DF[woe],var,train)
+    train[woe] = train[woe].fillna(0)    
+    test  = append_WOE(WOE_DF[woe],var,test)
+    test[woe] = test[woe].fillna(0)
+    model  = append_WOE(WOE_DF[woe],var,model)
+    model[woe] = model[woe].fillna(0)
+
+    
+# Update the model variable description
+tmp_WOE = MODELVAR[MODELVAR['MODELVAR'].isin(for_WOE_list)]
+tmp_WOE['MODELVAR'] = tmp_WOE['MODELVAR']+'_WOE'
+tmp_WOE['DESCRIPTION'] = 'The settlement score of ' + tmp_WOE['DESCRIPTION']
+MODELVAR1 = pd.concat([MODELVAR,tmp_WOE],axis=0)
+
+train.to_pickle('/data/lake/clmds/projects/GL/gl_train_WOE.pkl')
+test.to_pickle('/data/lake/clmds/projects/GL/gl_test_WOE.pkl')
+model.to_pickle('/data/lake/clmds/projects/GL/gl_model_WOE.pkl')
+In [331]:
+for_WOE_list
+Out[331]:
+Index(['NON_ZERO_LIAB_PRTY_COUNT_D', 'CLM_OVRRD_CDC_DESC_D',
+       'LOSS_LOC_ST_ABBR_D', 'LOSS_RPRT_LAG_AGE_D', 'BODY_PART_DESC_D',
+       'RPRT_TO_CASE_RCVD_DT_D', 'TEXT_VERDICT_GL', 'INJ_TYP_DESC_D',
+       'RPRT_TO_EXPSR_EXPNS_STTS_DT_D', 'COV_TYP_DESC_D',
+       'CLM_INDEM_INC_AMT_SF_D', 'FIRST_DEMAND_OFFER_GAP_D', 'LOSS_CS_DESC_D',
+       'TEXT_VOIR_DIRE_GL', 'TEXT_PRETRIAL_REPORT', 'BODY_PART_SBTYP_DESC_D',
+       'CLM_EXPNS_INC_AMT_SF_A', 'FIRST_OFFER_AMT_D', 'OFFER_CNT_D',
+       'DMND_CNT_D', 'VENUE_RATING_FINAL', 'LOW_END_AUTH_APPRV_AMT_D',
+       'TEXT_MOTIONS_IN_LIMINE_GL', 'HIGH_END_PN_SUFR_RECOM_AMT_D',
+       'CLM_CNTR_CONV_IND', 'RISK_TRNSFR_IND', 'LOSS_EVENT_FAULT_RATE_DESC',
+       'FIRST_DEMAND_LMT_RATIO_D', 'INSURED_LIAB_PCT_D', 'INSRD_FLT_PCT_D',
+       'HIGH_END_LPE_TTL_ADJ_DMG_AMT_D', 'HIGH_END_LPE_AUTH_APPRV_AMT_D',
+       'HIGH_END_LPE_EST_SETL_AMT_D', 'HIGH_END_LPE_FINAL_ADJ_AMT_D',
+       'HIGH_END_LPE_RNG_PCT_D', 'HIGH_END_LPE_RTO_AMT_D',
+       'HIGH_END_LPE_TTL_ADJS_AMT_D', 'HIGH_END_LPE_TTL_APRS_DMG_AMT_D',
+       'LOW_END_LPE_AUTH_APPRV_AMT_D', 'LOW_END_LPE_EST_SETL_AMT_D',
+       'LOW_END_LPE_FINAL_ADJ_AMT_D', 'LOW_END_LPE_RNG_PCT_D',
+       'LOW_END_LPE_RTO_AMT_D', 'LOW_END_LPE_TTL_ADJ_DMG_AMT_D',
+       'LOW_END_LPE_TTL_ADJS_AMT_D', 'LOW_END_LPE_TTL_APRS_DMG_AMT_D',
+       'LPE_NEGOT_SETL_AMT_D', 'LMT_D', 'HIGH_END_TTL_PN_SUFR_AMT_D'],
+      dtype='object')
+In [332]:
+for var, woe in zip(for_WOE_list, WOE_list):
+    if var in ['LOSS_LOC_ST_ABBR_D', 'INJ_TYP_DESC_D','CASE_ALLEGATION_DESC','BODY_PART_DESC_D','BODY_PART_SBTYP_DESC_D','CLM_REOPEN_IND_WOE']:
+        pd.DataFrame(WOE_DF[woe]).plot.barh(x=var,fontsize=8,figsize=(4,6), title=var, legend=False)
+    elif var in ['CLM_OVRRD_CDC_DESC_D']:
+        pd.DataFrame(WOE_DF[woe]).plot.barh(x=var,fontsize=8,figsize=(4,9), title=var, legend=False)
+    else:    
+        pd.DataFrame(WOE_DF[woe]).plot.barh(x=var,fontsize=8,figsize=(4,3), title=var, legend=False)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+In [333]:
+train = pd.read_pickle('/data/lake/clmds/projects/GL/gl_train_WOE.pkl')
+test  = pd.read_pickle('/data/lake/clmds/projects/GL/gl_test_WOE.pkl')
+model = pd.read_pickle('/data/lake/clmds/projects/GL/gl_model_WOE.pkl')
+
+# train_hex,test_hex, valid = model_hex.split_frame(ratios=[.8,0.199])
+trainWOE_hex = h2o.H2OFrame(train)
+testWOE_hex = h2o.H2OFrame(test)
+#H2O_selectedVarsWOEs = list(set(H2O_selectedVars + WOE_list) - set(for_WOE_list))
+H2O_selectedVarsWOEs = list(var_NUM) + WOE_list
+
+target     = 'TARGET2'
+
+H2O_selectedVarsWOEs = ['RPRT_YEAR',
+ 'CLM_OVRRD_CDC_DESC_D_WOE',
+ 'LOSS_LOC_ST_ABBR_D_WOE',
+ #'LOSS_RPRT_LAG_AGE_D_WOE',
+ 'INJ_TYP_DESC_D_WOE',
+ 'COV_TYP_DESC_D_WOE',
+ 'LOSS_CS_DESC_D_WOE',
+ #'CLM_EXPNS_INC_AMT_SF_A_WOE',
+ 'FIRST_OFFER_AMT_D_WOE',
+ 'INSURED_LIAB_PCT_D_WOE',
+ 'VENUE_RATING_FINAL_WOE',
+ 'LOW_END_AUTH_APPRV_AMT_D_WOE',
+                       ]
+h2o_gl_trial_WOE = H2ORandomForestEstimator(
+   model_id="h2o_gl_trial_WOE",
+   ntrees=400,
+   min_rows = 10,
+   max_depth = 12, 
+   stopping_rounds=2,
+   score_each_iteration=True,
+   stopping_metric='mse',
+   nfolds=10,
+   balance_classes=True,
+   seed=1234)
+h2o_gl_trial_WOE.train(H2O_selectedVarsWOEs, target, training_frame=trainWOE_hex)
+plt.figure(figsize=(9,3))
+ROC_AUC(h2o_gl_trial_WOE,testWOE_hex,'TARGET2')
+gains(h2o_gl_trial_WOE,testWOE_hex,'TARGET2',10)
+# save the model
+# model_path = h2o.save_model(model=h2o_gl_trial_WOE, path="/data/lake/clmds/projects/GL/", force=True)
+# print(model_path)
+Parse progress: |█████████████████████████████████████████████████████████| 100%
+Parse progress: |█████████████████████████████████████████████████████████| 100%
+drf Model Build progress: |███████████████████████████████████████████████| 100%
+drf prediction progress: |████████████████████████████████████████████████| 100%
+
+    * ROC curve: The ROC curve plots true positive rate vs. false positive rate
+
+    * The area under the curve (AUC): A value between 0.5 (random) and 1.0 (perfect), measuring the prediction accuracy
+
+    * Precision (P) = The number of true positives  / ( the number of true positives + the number of false positives)
+
+    * Recall (R) = The number of true positives / (the number of true positives + the number of false negatives)
+
+<Figure size 900x300 with 0 Axes>
+
+
+drf prediction progress: |████████████████████████████████████████████████| 100%
+Out[333]:
+count	if_random	actual - trial track	lift
+segment				
+0	625	27.2	84	3.09
+1	625	27.2	45	2.37
+2	625	27.2	32	1.97
+3	625	27.2	21	1.67
+4	625	27.2	22	1.50
+5	625	27.2	18	1.36
+6	625	27.2	19	1.27
+7	625	27.2	14	1.17
+8	625	27.2	12	1.09
+9	625	27.2	5	1.00
+In [334]:
+H2O_selectedVarsWOEs = list(var_NUM) + WOE_list
+H2O_selectedVarsWOEs
+Out[334]:
+['RPRT_YEAR',
+ 'NON_ZERO_LIAB_PRTY_COUNT_D_WOE',
+ 'CLM_OVRRD_CDC_DESC_D_WOE',
+ 'LOSS_LOC_ST_ABBR_D_WOE',
+ 'LOSS_RPRT_LAG_AGE_D_WOE',
+ 'BODY_PART_DESC_D_WOE',
+ 'RPRT_TO_CASE_RCVD_DT_D_WOE',
+ 'TEXT_VERDICT_GL_WOE',
+ 'INJ_TYP_DESC_D_WOE',
+ 'RPRT_TO_EXPSR_EXPNS_STTS_DT_D_WOE',
+ 'COV_TYP_DESC_D_WOE',
+ 'CLM_INDEM_INC_AMT_SF_D_WOE',
+ 'FIRST_DEMAND_OFFER_GAP_D_WOE',
+ 'LOSS_CS_DESC_D_WOE',
+ 'TEXT_VOIR_DIRE_GL_WOE',
+ 'TEXT_PRETRIAL_REPORT_WOE',
+ 'BODY_PART_SBTYP_DESC_D_WOE',
+ 'CLM_EXPNS_INC_AMT_SF_A_WOE',
+ 'FIRST_OFFER_AMT_D_WOE',
+ 'OFFER_CNT_D_WOE',
+ 'DMND_CNT_D_WOE',
+ 'VENUE_RATING_FINAL_WOE',
+ 'LOW_END_AUTH_APPRV_AMT_D_WOE',
+ 'TEXT_MOTIONS_IN_LIMINE_GL_WOE',
+ 'HIGH_END_PN_SUFR_RECOM_AMT_D_WOE',
+ 'CLM_CNTR_CONV_IND_WOE',
+ 'RISK_TRNSFR_IND_WOE',
+ 'LOSS_EVENT_FAULT_RATE_DESC_WOE',
+ 'FIRST_DEMAND_LMT_RATIO_D_WOE',
+ 'INSURED_LIAB_PCT_D_WOE',
+ 'INSRD_FLT_PCT_D_WOE',
+ 'HIGH_END_LPE_TTL_ADJ_DMG_AMT_D_WOE',
+ 'HIGH_END_LPE_AUTH_APPRV_AMT_D_WOE',
+ 'HIGH_END_LPE_EST_SETL_AMT_D_WOE',
+ 'HIGH_END_LPE_FINAL_ADJ_AMT_D_WOE',
+ 'HIGH_END_LPE_RNG_PCT_D_WOE',
+ 'HIGH_END_LPE_RTO_AMT_D_WOE',
+ 'HIGH_END_LPE_TTL_ADJS_AMT_D_WOE',
+ 'HIGH_END_LPE_TTL_APRS_DMG_AMT_D_WOE',
+ 'LOW_END_LPE_AUTH_APPRV_AMT_D_WOE',
+ 'LOW_END_LPE_EST_SETL_AMT_D_WOE',
+ 'LOW_END_LPE_FINAL_ADJ_AMT_D_WOE',
+ 'LOW_END_LPE_RNG_PCT_D_WOE',
+ 'LOW_END_LPE_RTO_AMT_D_WOE',
+ 'LOW_END_LPE_TTL_ADJ_DMG_AMT_D_WOE',
+ 'LOW_END_LPE_TTL_ADJS_AMT_D_WOE',
+ 'LOW_END_LPE_TTL_APRS_DMG_AMT_D_WOE',
+ 'LPE_NEGOT_SETL_AMT_D_WOE',
+ 'LMT_D_WOE',
+ 'HIGH_END_TTL_PN_SUFR_AMT_D_WOE']
+<-return to TOC
+
+Section 1.7: GLM-LASSO
+In [335]:
+import h2o
+h2o.init(port=543, start_h2o=True, nthreads=64)
+from h2o.estimators.glm import H2OGeneralizedLinearEstimator
+
+train = pd.read_pickle('/data/lake/clmds/projects/GL/gl_train_WOE.pkl')
+test  = pd.read_pickle('/data/lake/clmds/projects/GL/gl_test_WOE.pkl')
+model = pd.read_pickle('/data/lake/clmds/projects/GL/gl_model_WOE.pkl')
+
+# train_hex,test_hex, valid = model_hex.split_frame(ratios=[.8,0.199])
+trainWOE_hex = h2o.H2OFrame(train)
+testWOE_hex = h2o.H2OFrame(test)
+
+target     = 'TARGET2'
+
+# try using the `lambda_` parameter:
+# initialize your estimator
+glm = H2OGeneralizedLinearEstimator(family = 'binomial', lambda_ = .0001)
+
+# then train your model
+glm.train(x = H2O_selectedVarsWOEs, y = target,
+          training_frame = trainWOE_hex,
+          validation_frame = testWOE_hex)
+
+# print the auc for the validation data
+print(glm.auc(valid=True))
+
+
+# Example of values to grid over for `lambda`
+# import Grid Search
+from h2o.grid.grid_search import H2OGridSearch
+
+# select the values for lambda_ to grid over
+hyper_params = {'lambda': [1, 0.5, 0.1, 0.01, 0.001, 0.0001, 0.00001, 0]}
+
+glm_2 = H2OGeneralizedLinearEstimator(family = 'binomial')
+
+# build grid search with previously made GLM and hyperparameters
+grid = H2OGridSearch(model = glm_2, hyper_params = hyper_params,
+                     search_criteria = {'strategy': "Cartesian"})
+
+# train using the grid
+grid.train(x = H2O_selectedVarsWOEs, y = target,
+          training_frame = trainWOE_hex,
+          validation_frame = testWOE_hex)
+
+
+# sort the grid models by decreasing AUC
+sorted_grid = grid.get_grid(sort_by = 'auc', decreasing = True)
+print(sorted_grid)
+Checking whether there is an H2O instance running at http://localhost:543 ..... not found.
+Attempting to start a local H2O server...
+  Java Version: openjdk version "1.8.0_181"; OpenJDK Runtime Environment (build 1.8.0_181-b13); OpenJDK 64-Bit Server VM (build 25.181-b13, mixed mode)
+  Starting server from /tech/appl/default/user/ck92663e/.conda/envs/h2o/lib/python3.7/site-packages/h2o/backend/bin/h2o.jar
+  Ice root: /data/user/ck92663e/tmp/tmp0znwpp65
+  JVM stdout: /data/user/ck92663e/tmp/tmp0znwpp65/h2o_ck92663e_started_from_python.out
+  JVM stderr: /data/user/ck92663e/tmp/tmp0znwpp65/h2o_ck92663e_started_from_python.err
+  Server is running at http://127.0.0.1:1039
+Connecting to H2O server at http://127.0.0.1:1039 ... successful.
+Warning: Your H2O cluster version is too old (7 months and 7 days)! Please download and install the latest version from http://h2o.ai/download/
+H2O_cluster_uptime:	01 secs
+H2O_cluster_timezone:	America/New_York
+H2O_data_parsing_timezone:	UTC
+H2O_cluster_version:	3.32.1.2
+H2O_cluster_version_age:	7 months and 7 days !!!
+H2O_cluster_name:	H2O_from_python_ck92663e_d503n7
+H2O_cluster_total_nodes:	1
+H2O_cluster_free_memory:	26.67 Gb
+H2O_cluster_total_cores:	96
+H2O_cluster_allowed_cores:	64
+H2O_cluster_status:	accepting new members, healthy
+H2O_connection_url:	http://127.0.0.1:1039
+H2O_connection_proxy:	{"http": null, "https": null}
+H2O_internal_security:	False
+H2O_API_Extensions:	Amazon S3, XGBoost, Algos, AutoML, Core V3, TargetEncoder, Core V4
+Python_version:	3.7.10 final
+Parse progress: |█████████████████████████████████████████████████████████| 100%
+Parse progress: |█████████████████████████████████████████████████████████| 100%
+glm Model Build progress: |███████████████████████████████████████████████| 100%
+0.7460455493672878
+glm Grid Build progress: |████████████████████████████████████████████████| 100%
+       lambda  \
+0     [0.001]   
+1    [1.0E-4]   
+2       [0.0]   
+3    [1.0E-5]   
+4      [0.01]   
+5       [1.0]   
+6       [0.5]   
+7       [0.1]   
+
+
+
+                                                               model_ids  \
+0  Grid_GLM_Key_Frame__upload_909f7ae226a7dd6af5505f3e3b8340f6.hex_mo...   
+1  Grid_GLM_Key_Frame__upload_909f7ae226a7dd6af5505f3e3b8340f6.hex_mo...   
+2  Grid_GLM_Key_Frame__upload_909f7ae226a7dd6af5505f3e3b8340f6.hex_mo...   
+3  Grid_GLM_Key_Frame__upload_909f7ae226a7dd6af5505f3e3b8340f6.hex_mo...   
+4  Grid_GLM_Key_Frame__upload_909f7ae226a7dd6af5505f3e3b8340f6.hex_mo...   
+5  Grid_GLM_Key_Frame__upload_909f7ae226a7dd6af5505f3e3b8340f6.hex_mo...   
+6  Grid_GLM_Key_Frame__upload_909f7ae226a7dd6af5505f3e3b8340f6.hex_mo...   
+7  Grid_GLM_Key_Frame__upload_909f7ae226a7dd6af5505f3e3b8340f6.hex_mo...   
+
+                  auc  
+0  0.7471073470371755  
+1  0.7460455493672878  
+2  0.7458253793320606  
+3  0.7457869418259107  
+4  0.7370253429240549  
+5                 0.5  
+6                 0.5  
+7                 0.5  
+
+In [336]:
+#gains(grid,test_hex,'TARGET2',10)
+In [ ]:
+
+<-return to TOC
+
+Section 2: Binary Model with sklearn 
+Section 2.1: Without the AI/PI claims 
+894 'AI/PI' claims in the LOSS_CS_DESC_D are removed
+In [3]:
+import numpy as np
+import cx_Oracle
+import pandas as pd
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+#from dython.nominal import associations
+import warnings
+warnings.filterwarnings("ignore")
+
+__author__ = "chris.kuo@thehartford.com"
+
+train = pd.read_pickle('/data/lake/clmds/projects/GL/gl_train_WOE.pkl')
+test  = pd.read_pickle('/data/lake/clmds/projects/GL/gl_test_WOE.pkl')
+model = pd.read_pickle('/data/lake/clmds/projects/GL/gl_model_WOE.pkl')
+
+train = train[train['LOSS_CS_DESC_D'] !='AI/PI']
+test = test[test['LOSS_CS_DESC_D'] !='AI/PI']
+model = model[model['LOSS_CS_DESC_D'] !='AI/PI']
+In [338]:
+H2O_selectedVarsWOEs = ['RPRT_YEAR',
+ 'CLM_OVRRD_CDC_DESC_D_WOE',
+ 'LOSS_LOC_ST_ABBR_D_WOE',
+ 'TRIAL_SCHDL_DT_IND',
+ 'TEXT_PRETRIAL_REPORT_WOE',
+ #'LOSS_RPRT_LAG_AGE_D_WOE',
+ 'INJ_TYP_DESC_D_WOE',
+ 'COV_TYP_DESC_D_WOE',
+ 'LOSS_CS_DESC_D_WOE',
+ #'CLM_EXPNS_INC_AMT_SF_A_WOE',
+ #'FIRST_OFFER_AMT_D_WOE',
+ 'INSURED_LIAB_PCT_D_WOE',
+ 'VENUE_RATING_FINAL_WOE',
+ 'LOW_END_AUTH_APPRV_AMT_D_WOE',
+ #'NON_ZERO_LIAB_PRTY_COUNT_D_WOE',
+ 'OFFER_CNT_D_WOE',
+ #'FIRST_DEMAND_LMT_RATIO_D_WOE',
+ #'FIRST_DEMAND_OFFER_GAP_D_WOE',                        
+ #'LMT_D_WOE',
+ #'LOW_END_LPE_RNG_PCT_D_WOE',
+ #'HIGH_END_LPE_TTL_APRS_DMG_AMT_D_WOE', 
+ #'LOSS_EVENT_FAULT_RATE_DESC_WOE'
+ #'DMND_CNT_D_WOE',
+ #'CLM_INDEM_INC_AMT_SF_D_WOE',
+ #'BODY_PART_DESC_D_WOE',
+ #'BODY_PART_SBTYP_DESC_D_WOE',
+ #'HIGH_END_TTL_PN_SUFR_AMT_D_WOE'
+ #'RPRT_TO_EXPSR_EXPNS_STTS_DT_D_WOE',              
+ #'LOSS_EVENT_FAULT_RATE_DESC_WOE',
+ #'CLM_CNTR_CONV_IND_WOE',
+ #'RISK_TRNSFR_IND_WOE',
+ #'RPRT_TO_CASE_RCVD_DT_D_WOE',
+                       ]
+In [339]:
+def scikit_model(H2O_selectedVarsWOEs):
+    import pandas as pd
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from sklearn.model_selection import train_test_split
+    from sklearn.ensemble import RandomForestRegressor
+    #import xgboost as xgb
+    from sklearn.model_selection import train_test_split
+
+    shap_vars = H2O_selectedVarsWOEs
+
+    Y_train=train['TARGET2']
+    Y_test=test['TARGET2']
+    train[shap_vars] = train[shap_vars].fillna(0)
+    test[shap_vars] = test[shap_vars].fillna(0)
+
+    # Modeling
+    np.random.seed(123)
+    auto_scikit_WOEmodel = RandomForestRegressor(max_depth=8,
+                                                 min_samples_leaf = 10, 
+                                                 random_state=0, 
+                                                 n_estimators=400)
+    auto_scikit_WOEmodel.fit(train[shap_vars], Y_train)
+
+    return(auto_scikit_WOEmodel)
+
+gl_scikit_WOEmodel = scikit_model(H2O_selectedVarsWOEs)
+In [340]:
+GL_feature_importances = gl_scikit_WOEmodel.feature_importances_
+importances = pd.Series(GL_feature_importances, index=H2O_selectedVarsWOEs)
+indices = np.argsort(importances)
+plt.title('Feature Importances')
+plt.barh(range(len(indices)), importances[indices], color='b', align='center')
+plt.yticks(range(len(indices)), [H2O_selectedVarsWOEs[i] for i in indices])
+plt.xlabel('Relative Importance')
+plt.show()
+
+In [341]:
+def scikit_gains(model,df,var_list,target,seg):
+    y_pred = model.predict(df[var_list])
+    y_pred = pd.Series(y_pred).reset_index(drop='index')
+    y_actual = pd.Series(df[target]).reset_index(drop='index')
+    data = pd.concat([y_actual,y_pred],axis=1)
+    data.columns = [target,'predict']
+    data= data.sort_values(by='predict',ascending=False)
+    data['row_id'] = range(0,0+len(data))
+    data['segment'] = ( data['row_id'] / (len(data)/seg) ).astype(int)
+    # Check the count by decile
+    data.loc[data['segment'] == seg]=(seg-1)
+
+    #create gains table
+    gains = data.groupby('segment')[[target,'predict']].agg(['count','sum','min','max']).drop([('TARGET2',   'min'),('TARGET2',   'max'), ('predict', 'count'),('predict',   'sum')],axis=1)
+    gains.columns = ['count','actual','min_pred','max_pred']
+    gains
+
+    #add metrics to the gains table
+    #gains['non_actual'] = gains['count'] - gains['actual']
+    gains['cum_count'] = gains['count'].cumsum()
+    gains['cum_actual'] = gains['actual'].cumsum()
+    #gains['cum_non_actual'] = gains['non_actual'].cumsum()
+    gains['percent_cum_actual'] = (gains['cum_actual'] / np.max(gains['cum_actual'])).round(2)
+    #gains['percent_cum_non_actual'] = (gains['cum_non_actual'] / np.max(gains['cum_non_actual'])).round(2)
+    gains['if_random'] = np.max(gains['cum_actual']) /seg
+    gains['if_random_cum'] = gains['if_random'].cumsum()
+    gains['lift'] = (gains['cum_actual'] / gains['if_random_cum']).round(2)
+    gains['actual_%'] = ((gains['actual'] / gains['count'])*100).round(2)
+    #gains['K_S'] = np.abs( gains['percent_cum_actual'] - gains['percent_cum_non_actual'] ) * 100
+    #gains['gain']=(gains['cum_actual']/gains['cum_count']*100).round(2)
+    #gains = pd.DataFrame(gains)
+    gains = gains[['count', 'actual','actual_%','lift','min_pred','max_pred']]
+    return(gains)
+In [342]:
+scikit_gains(model = gl_scikit_WOEmodel, df =test, var_list = H2O_selectedVarsWOEs,target='TARGET2', seg = 10 )
+Out[342]:
+count	actual	actual_%	lift	min_pred	max_pred
+segment						
+0	597	100	16.75	3.82	0.086570	0.572592
+1	597	31	5.19	2.50	0.058511	0.086566
+2	597	37	6.20	2.14	0.044381	0.058497
+3	596	26	4.36	1.85	0.035165	0.044372
+4	597	19	3.18	1.63	0.028972	0.035149
+5	597	9	1.51	1.41	0.023853	0.028972
+6	596	16	2.68	1.30	0.017644	0.023851
+7	597	14	2.35	1.20	0.010763	0.017637
+8	597	7	1.17	1.10	0.005119	0.010756
+9	596	3	0.50	1.00	0.000576	0.005106
+In [343]:
+def theSHAP(gl_scikit_WOEmodel,H2O_selectedVarsWOEs):
+    #! pip install shap
+    import matplotlib.pyplot as plt
+    import shap
+    import pickle
+
+    skWOE_shap_values = shap.TreeExplainer(gl_scikit_WOEmodel).shap_values(test[H2O_selectedVarsWOEs])
+    #f.savefig("/summary_plot1.png", bbox_inches='tight', dpi=600)
+
+    explainer = shap.Explainer(gl_scikit_WOEmodel)
+    skWOE_shap_values = explainer(test[H2O_selectedVarsWOEs])
+
+    shap.summary_plot(skWOE_shap_values, show=False, max_display = 100) #max_display=test.shape[1])
+    #shap.summary_plot(sk_shap_values, test_dummies[shap_vars], show=False)
+    fig = plt.gcf()
+    fig.set_figheight(7)
+    fig.set_figwidth(5)
+    ax = plt.gca()
+    ax.set_xlabel(r'SHAP', fontsize=6)
+    ax.set_ylabel('Variables', fontsize=6)
+    #ylabels = string_latexer([tick.get_text() for tick in ax.get_yticklabels()])
+    #ax.set_yticklabels(ylabels)
+    plt.show()
+    return(skWOE_shap_values)
+
+skWOE_shap_values = theSHAP(gl_scikit_WOEmodel,H2O_selectedVarsWOEs)
+
+<-return to TOC
+
+Section 2.2: Final model 
+In [4]:
+import numpy as np
+import cx_Oracle
+import pandas as pd
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+#from dython.nominal import associations
+import warnings
+warnings.filterwarnings("ignore")
+
+__author__ = "chris.kuo@thehartford.com"
+
+train = pd.read_pickle('/data/lake/clmds/projects/GL/gl_train_WOE.pkl')
+test  = pd.read_pickle('/data/lake/clmds/projects/GL/gl_test_WOE.pkl')
+model = pd.read_pickle('/data/lake/clmds/projects/GL/gl_model_WOE.pkl')
+
+#from sklearn.model_selection import train_test_split
+#train, test = train_test_split(model, test_size=0.6)
+model['TARGET2'].value_counts()
+Out[4]:
+0    19941
+1      890
+Name: TARGET2, dtype: int64
+In [5]:
+H2O_selectedVarsWOEs = ['RPRT_YEAR',
+ 'CLM_OVRRD_CDC_DESC_D_WOE',
+ 'LOSS_LOC_ST_ABBR_D_WOE',
+ 'TRIAL_SCHDL_DT_IND',
+ 'TEXT_PRETRIAL_REPORT_WOE',
+ #'LOSS_RPRT_LAG_AGE_D_WOE',
+ 'INJ_TYP_DESC_D_WOE',
+ 'COV_TYP_DESC_D_WOE',
+ 'LOSS_CS_DESC_D_WOE',
+ #'CLM_EXPNS_INC_AMT_SF_A_WOE',
+ #'FIRST_OFFER_AMT_D_WOE',
+ 'INSURED_LIAB_PCT_D_WOE',
+ 'VENUE_RATING_FINAL_WOE',
+ 'LOW_END_AUTH_APPRV_AMT_D_WOE',
+ #'NON_ZERO_LIAB_PRTY_COUNT_D_WOE',
+ 'OFFER_CNT_D_WOE',
+ #'FIRST_DEMAND_LMT_RATIO_D_WOE',
+ #'FIRST_DEMAND_OFFER_GAP_D_WOE',                        
+ #'LMT_D_WOE',
+ #'LOW_END_LPE_RNG_PCT_D_WOE',
+ #'HIGH_END_LPE_TTL_APRS_DMG_AMT_D_WOE', 
+ #'LOSS_EVENT_FAULT_RATE_DESC_WOE'
+ #'DMND_CNT_D_WOE',
+ #'CLM_INDEM_INC_AMT_SF_D_WOE',
+ #'BODY_PART_DESC_D_WOE',
+ #'BODY_PART_SBTYP_DESC_D_WOE',
+ #'HIGH_END_TTL_PN_SUFR_AMT_D_WOE'
+ #'RPRT_TO_EXPSR_EXPNS_STTS_DT_D_WOE',              
+ #'LOSS_EVENT_FAULT_RATE_DESC_WOE',
+ #'CLM_CNTR_CONV_IND_WOE',
+ #'RISK_TRNSFR_IND_WOE',
+ #'RPRT_TO_CASE_RCVD_DT_D_WOE',
+                        
+                        
+                       ]
+In [6]:
+def scikit_model(H2O_selectedVarsWOEs):
+    import pandas as pd
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from sklearn.model_selection import train_test_split
+    from sklearn.ensemble import RandomForestRegressor
+    #import xgboost as xgb
+    from sklearn.model_selection import train_test_split
+
+    shap_vars = H2O_selectedVarsWOEs
+
+    Y_train=train['TARGET2']
+    Y_test=test['TARGET2']
+    train[shap_vars] = train[shap_vars].fillna(0)
+    test[shap_vars] = test[shap_vars].fillna(0)
+
+    # Modeling
+    np.random.seed(123)
+    auto_scikit_WOEmodel = RandomForestRegressor(max_depth=8,
+                                                 min_samples_leaf = 10, 
+                                                 random_state=0, 
+                                                 n_estimators=400)
+    auto_scikit_WOEmodel.fit(train[shap_vars], Y_train)
+
+
+    # save the model to disk
+    # comment out because we do not want to run again and over-write the model that has been produced. 
+    
+    #import pickle
+    #filename = '/data/lake/clmds/projects/GL/gl_scikit_WOEmodel.pkl'
+    #pickle.dump(auto_scikit_WOEmodel, open(filename, 'wb'))
+    # load the model from disk
+    #gl_scikit_WOEmodel = pickle.load(open(filename, 'rb'))
+    
+    return(auto_scikit_WOEmodel)
+
+gl_scikit_WOEmodel = scikit_model(H2O_selectedVarsWOEs)
+In [7]:
+GL_feature_importances = gl_scikit_WOEmodel.feature_importances_
+importances = pd.Series(GL_feature_importances, index=H2O_selectedVarsWOEs)
+indices = np.argsort(importances)
+plt.title('Feature Importances')
+plt.barh(range(len(indices)), importances[indices], color='b', align='center')
+plt.yticks(range(len(indices)), [H2O_selectedVarsWOEs[i] for i in indices])
+plt.xlabel('Relative Importance')
+plt.show()
+
+In [8]:
+def scikit_gains(model,df,var_list,target,seg):
+    y_pred = model.predict(df[var_list])
+    y_pred = pd.Series(y_pred).reset_index(drop='index')
+    y_actual = pd.Series(df[target]).reset_index(drop='index')
+    data = pd.concat([y_actual,y_pred],axis=1)
+    data.columns = [target,'predict']
+    data= data.sort_values(by='predict',ascending=False)
+    data['row_id'] = range(0,0+len(data))
+    data['segment'] = ( data['row_id'] / (len(data)/seg) ).astype(int)
+    # Check the count by decile
+    data.loc[data['segment'] == seg]=(seg-1)
+
+    #create gains table
+    gains = data.groupby('segment')[[target,'predict']].agg(['count','sum','min','max']).drop([('TARGET2',   'min'),('TARGET2',   'max'), ('predict', 'count'),('predict',   'sum')],axis=1)
+    gains.columns = ['count','actual','min_pred','max_pred']
+    gains
+
+    #add metrics to the gains table
+    #gains['non_actual'] = gains['count'] - gains['actual']
+    gains['cum_count'] = gains['count'].cumsum()
+    gains['cum_actual'] = gains['actual'].cumsum()
+    #gains['cum_non_actual'] = gains['non_actual'].cumsum()
+    gains['percent_cum_actual'] = (gains['cum_actual'] / np.max(gains['cum_actual'])).round(2)
+    #gains['percent_cum_non_actual'] = (gains['cum_non_actual'] / np.max(gains['cum_non_actual'])).round(2)
+    gains['if_random'] = np.max(gains['cum_actual']) /seg
+    gains['if_random_cum'] = gains['if_random'].cumsum()
+    gains['lift'] = (gains['cum_actual'] / gains['if_random_cum']).round(2)
+    gains['actual_%'] = ((gains['actual'] / gains['count'])*100).round(2)
+    #gains['K_S'] = np.abs( gains['percent_cum_actual'] - gains['percent_cum_non_actual'] ) * 100
+    #gains['gain']=(gains['cum_actual']/gains['cum_count']*100).round(2)
+    #gains = pd.DataFrame(gains)
+    gains = gains[['count', 'actual','actual_%','lift','min_pred','max_pred']]
+    return(gains)
+In [9]:
+scikit_gains(model = gl_scikit_WOEmodel, df =test, var_list = H2O_selectedVarsWOEs,target='TARGET2', seg = 10 )
+Out[9]:
+count	actual	actual_%	lift	min_pred	max_pred
+segment						
+0	625	103	16.48	3.79	0.087556	0.581944
+1	625	34	5.44	2.52	0.058177	0.087483
+2	625	36	5.76	2.12	0.044841	0.058146
+3	625	28	4.48	1.85	0.035487	0.044837
+4	625	20	3.20	1.62	0.029246	0.035474
+5	625	12	1.92	1.43	0.024064	0.029227
+6	625	16	2.56	1.31	0.018470	0.024062
+7	625	13	2.08	1.20	0.012029	0.018466
+8	625	6	0.96	1.09	0.005620	0.012027
+9	625	4	0.64	1.00	0.000631	0.005608
+In [10]:
+scikit_gains(model = gl_scikit_WOEmodel, df =test, var_list = H2O_selectedVarsWOEs,target='TARGET2', seg = 50 )
+Out[10]:
+count	actual	actual_%	lift	min_pred	max_pred
+segment						
+0	125	40	32.0	7.35	0.248308	0.581944
+1	125	23	18.4	5.79	0.153988	0.248072
+2	125	14	11.2	4.72	0.116347	0.153034
+3	125	17	13.6	4.32	0.100072	0.116289
+4	125	9	7.2	3.79	0.087556	0.099866
+5	125	5	4.0	3.31	0.079681	0.087483
+6	125	8	6.4	3.05	0.072187	0.079430
+7	125	6	4.8	2.80	0.067167	0.072125
+8	125	7	5.6	2.63	0.061857	0.067166
+9	125	8	6.4	2.52	0.058177	0.061818
+10	125	4	3.2	2.36	0.054872	0.058146
+11	125	6	4.8	2.25	0.051898	0.054859
+12	125	10	8.0	2.22	0.049589	0.051894
+13	125	10	8.0	2.19	0.046947	0.049550
+14	125	6	4.8	2.12	0.044841	0.046941
+15	125	5	4.0	2.05	0.042741	0.044837
+16	125	5	4.0	1.98	0.040922	0.042735
+17	125	7	5.6	1.94	0.039200	0.040912
+18	125	4	3.2	1.88	0.037132	0.039186
+19	125	7	5.6	1.85	0.035487	0.037130
+20	125	7	5.6	1.82	0.033808	0.035474
+21	125	3	2.4	1.76	0.032620	0.033797
+22	125	6	4.8	1.73	0.031434	0.032615
+23	125	2	1.6	1.68	0.030297	0.031427
+24	125	2	1.6	1.63	0.029246	0.030297
+25	125	0	0.0	1.56	0.028204	0.029227
+26	125	3	2.4	1.53	0.027080	0.028204
+27	125	4	3.2	1.50	0.026053	0.027076
+28	125	4	3.2	1.47	0.025090	0.026053
+29	125	1	0.8	1.43	0.024064	0.025089
+30	125	3	2.4	1.40	0.023177	0.024062
+31	125	6	4.8	1.39	0.022199	0.023170
+32	125	3	2.4	1.36	0.020931	0.022178
+33	125	3	2.4	1.34	0.019744	0.020916
+34	125	1	0.8	1.31	0.018470	0.019735
+35	125	3	2.4	1.29	0.017006	0.018466
+36	125	1	0.8	1.26	0.015734	0.017002
+37	125	1	0.8	1.23	0.014467	0.015734
+38	125	2	1.6	1.21	0.013236	0.014463
+39	125	6	4.8	1.20	0.012029	0.013226
+40	125	3	2.4	1.19	0.010796	0.012027
+41	125	1	0.8	1.16	0.009539	0.010795
+42	125	1	0.8	1.14	0.008218	0.009534
+43	125	1	0.8	1.12	0.006777	0.008212
+44	125	0	0.0	1.09	0.005620	0.006749
+45	125	1	0.8	1.07	0.004666	0.005608
+46	125	1	0.8	1.06	0.003813	0.004659
+47	125	2	1.6	1.04	0.002885	0.003812
+48	125	0	0.0	1.02	0.001628	0.002881
+49	125	0	0.0	1.00	0.000631	0.001617
+In [11]:
+scikit_gains(model = gl_scikit_WOEmodel, df =train, var_list = H2O_selectedVarsWOEs,target='TARGET2', seg = 10 )
+Out[11]:
+count	actual	actual_%	lift	min_pred	max_pred
+segment						
+0	1459	370	25.36	5.99	0.084198	0.580397
+1	1458	108	7.41	3.87	0.056183	0.084189
+2	1458	56	3.84	2.88	0.043555	0.056148
+3	1458	39	2.67	2.32	0.034776	0.043548
+4	1458	20	1.37	1.92	0.028802	0.034775
+5	1458	11	0.75	1.63	0.023844	0.028802
+6	1458	9	0.62	1.42	0.018018	0.023839
+7	1458	4	0.27	1.25	0.012179	0.018010
+8	1458	1	0.07	1.11	0.005579	0.012177
+9	1458	0	0.00	1.00	0.000616	0.005574
+In [350]:
+def theSHAP(gl_scikit_WOEmodel,H2O_selectedVarsWOEs):
+    #! pip install shap
+    import matplotlib.pyplot as plt
+    import shap
+    import pickle
+
+    skWOE_shap_values = shap.TreeExplainer(gl_scikit_WOEmodel).shap_values(test[H2O_selectedVarsWOEs])
+    #f.savefig("/summary_plot1.png", bbox_inches='tight', dpi=600)
+
+    explainer = shap.Explainer(gl_scikit_WOEmodel)
+    skWOE_shap_values = explainer(test[H2O_selectedVarsWOEs])
+
+    shap.summary_plot(skWOE_shap_values, show=False, max_display = 100) #max_display=test.shape[1])
+    #shap.summary_plot(sk_shap_values, test_dummies[shap_vars], show=False)
+    fig = plt.gcf()
+    fig.set_figheight(7)
+    fig.set_figwidth(5)
+    ax = plt.gca()
+    ax.set_xlabel(r'SHAP', fontsize=6)
+    ax.set_ylabel('Variables', fontsize=6)
+    #ylabels = string_latexer([tick.get_text() for tick in ax.get_yticklabels()])
+    #ax.set_yticklabels(ylabels)
+    plt.show()
+    return(skWOE_shap_values)
+
+skWOE_shap_values = theSHAP(gl_scikit_WOEmodel,H2O_selectedVarsWOEs)
+
+
+
+In [353]:
+# NON_ZERO_LIAB_PRTY_COUNT_D is highly correlated with INSURED_LIAB_PCT_D
+corrlist = ['RPRT_YEAR',
+ 'CLM_OVRRD_CDC_DESC_D_WOE',
+ 'LOSS_LOC_ST_ABBR_D_WOE',
+ 'TRIAL_SCHDL_DT_IND',
+ 'TEXT_PRETRIAL_REPORT_WOE',
+ 'LOSS_RPRT_LAG_AGE_D_WOE',
+ 'INJ_TYP_DESC_D_WOE',
+ 'COV_TYP_DESC_D_WOE',
+ 'LOSS_CS_DESC_D_WOE',
+ 'CLM_EXPNS_INC_AMT_SF_A_WOE',
+ 'FIRST_OFFER_AMT_D_WOE',
+ 'INSURED_LIAB_PCT_D_WOE',
+ 'VENUE_RATING_FINAL_WOE',
+ 'LOW_END_AUTH_APPRV_AMT_D_WOE',
+ 'NON_ZERO_LIAB_PRTY_COUNT_D_WOE',
+ 'OFFER_CNT_D_WOE',
+ 'FIRST_DEMAND_LMT_RATIO_D_WOE',
+ 'FIRST_DEMAND_OFFER_GAP_D_WOE',                        
+ 'LMT_D_WOE',
+ 'LOW_END_LPE_RNG_PCT_D_WOE',
+ 'HIGH_END_LPE_TTL_APRS_DMG_AMT_D_WOE', 
+ 'LOSS_EVENT_FAULT_RATE_DESC_WOE',
+ 'DMND_CNT_D_WOE',
+ 'CLM_INDEM_INC_AMT_SF_D_WOE',
+ 'BODY_PART_DESC_D_WOE',
+ 'BODY_PART_SBTYP_DESC_D_WOE',
+ 'HIGH_END_TTL_PN_SUFR_AMT_D_WOE',
+ 'RPRT_TO_EXPSR_EXPNS_STTS_DT_D_WOE',              
+ 'LOSS_EVENT_FAULT_RATE_DESC_WOE',
+ 'CLM_CNTR_CONV_IND_WOE',
+ 'RISK_TRNSFR_IND_WOE',
+ 'RPRT_TO_CASE_RCVD_DT_D_WOE',
+                       ]
+d = model[corrlist].corr()
+d['NON_ZERO_LIAB_PRTY_COUNT_D_WOE'].sort_values()
+Out[353]:
+TEXT_PRETRIAL_REPORT_WOE              -0.083737
+TRIAL_SCHDL_DT_IND                    -0.045052
+VENUE_RATING_FINAL_WOE                -0.020304
+LOSS_RPRT_LAG_AGE_D_WOE               -0.007875
+RPRT_YEAR                              0.009914
+CLM_CNTR_CONV_IND_WOE                  0.012856
+LOSS_LOC_ST_ABBR_D_WOE                 0.017077
+RPRT_TO_CASE_RCVD_DT_D_WOE             0.046256
+LMT_D_WOE                              0.052479
+CLM_EXPNS_INC_AMT_SF_A_WOE             0.055992
+HIGH_END_LPE_TTL_APRS_DMG_AMT_D_WOE    0.060217
+CLM_INDEM_INC_AMT_SF_D_WOE             0.086585
+CLM_OVRRD_CDC_DESC_D_WOE               0.114154
+BODY_PART_SBTYP_DESC_D_WOE             0.138187
+LOW_END_LPE_RNG_PCT_D_WOE              0.142475
+BODY_PART_DESC_D_WOE                   0.163817
+RPRT_TO_EXPSR_EXPNS_STTS_DT_D_WOE      0.180418
+INJ_TYP_DESC_D_WOE                     0.199918
+RISK_TRNSFR_IND_WOE                    0.201596
+FIRST_DEMAND_LMT_RATIO_D_WOE           0.202273
+FIRST_OFFER_AMT_D_WOE                  0.211152
+OFFER_CNT_D_WOE                        0.212324
+COV_TYP_DESC_D_WOE                     0.215621
+FIRST_DEMAND_OFFER_GAP_D_WOE           0.218684
+LOSS_CS_DESC_D_WOE                     0.238139
+LOW_END_AUTH_APPRV_AMT_D_WOE           0.240598
+DMND_CNT_D_WOE                         0.253318
+HIGH_END_TTL_PN_SUFR_AMT_D_WOE         0.301954
+LOSS_EVENT_FAULT_RATE_DESC_WOE         0.631333
+LOSS_EVENT_FAULT_RATE_DESC_WOE         0.631333
+INSURED_LIAB_PCT_D_WOE                 0.805898
+NON_ZERO_LIAB_PRTY_COUNT_D_WOE         1.000000
+Name: NON_ZERO_LIAB_PRTY_COUNT_D_WOE, dtype: float64
+In [ ]:
+
+<-return to TOC
+
+Section 2.3: Actual vs. Prediction 
+In [355]:
+##############################
+# Categorical One-way plots  #
+##############################
+def one_way(model,var,title,sorting):
+    # Summary statistics by var
+    model['TARGET'] = model['TARGET'].astype(int)
+    #for_plot = model.groupby(var)['TARGET'].agg(var='count','TARGET'='sum').reset_index()                         
+    for_plot = model.groupby(var)['TARGET'].agg(['count','sum']).reset_index()
+    for_plot.columns = [var , 'COUNT','TARGET']
+    for_plot['PERCENT'] = for_plot['TARGET'] /  for_plot['COUNT'] * 100
+    if sorting == 'DATE_D' :  
+         for_plot['D'] = for_plot[var].str.split(r"(", expand=True)[1]
+         for_plot['D'] = for_plot['D'].str.split(r",", expand=True)[0]
+         for_plot['D'] = for_plot['D'].astype(float)
+         for_plot = for_plot.sort_values(by='D',ascending=True)
+    elif sorting == 'Num':
+         for_plot = for_plot.sort_values(by=var,ascending=True)
+    elif sorting == 'CAT' or sorting == 'AMT_D':
+         for_plot = for_plot.sort_values(by='COUNT',ascending=False)
+
+    # Plot
+    #import matplotlib.style
+    #import matplotlib as mpl
+    #mpl.style.use('seaborn-whitegrid')
+    plt.style.use('seaborn-whitegrid')
+    if for_plot.shape[0]>15:
+        for_plot = for_plot [0:30]
+        fig, ax1 = plt.subplots(figsize=(9,4))
+    else:    
+        fig, ax1 = plt.subplots(figsize=(6,4))
+    width = 0.35
+    rotation = 90
+
+    # colors
+    freq_color = '#3A5A78' # Hartford Blue
+    target_color = '#82282F' # Hartford Red
+    prediction_color = '#F7941F' # Hartford Orange
+
+    ax1.grid(False)
+    ax1.bar(for_plot[var],for_plot['COUNT'], width, label=var,color=freq_color)
+    ax1.tick_params(axis='x', labelcolor='black',rotation= rotation)
+    ax1.set_ylabel('COUNT', color='black', fontsize=10)  # we already handled the x-label with ax1
+    ax2 = ax1.twinx()  # instantiate a second axes that shares the same x-axis
+    ax2.set_ylim(60,110)
+    ax2.set_ylabel('PERCENT OF SETTLED CLAIMS', color=target_color, fontsize=10)  # we already handled the x-label with ax1
+    ax2.plot(for_plot[var], for_plot['PERCENT'], 'o',ls='-', color = target_color)
+    ax2.tick_params(axis='y', labelcolor=target_color)
+    #ax2.grid(False)
+    #plt.title(title)
+    ax1.set_title(title ,fontsize= 14,  wrap=True)
+    #fig.tight_layout()  
+    plt.show()
+In [356]:
+this_model = gl_scikit_WOEmodel
+var_list = H2O_selectedVarsWOEs
+target='TARGET2'
+def scoring(df,dfname):
+    y_pred = this_model.predict(df[var_list])
+    y_pred = pd.Series(y_pred).reset_index(drop='index')
+    y_actual = pd.Series(df[target]).reset_index(drop='index')
+    actual_pred = pd.concat([df,y_pred],axis=1)
+    actual_pred['grp'] = dfname
+    return actual_pred
+actual_pred_train = scoring(train,'train')
+actual_pred_test = scoring(test,'test')
+actual_pred = pd.concat([actual_pred_train,actual_pred_test],axis=0)
+actual_pred.shape
+Out[356]:
+(20831, 932)
+In [357]:
+actual_pred['LOSS_CS_COV_TYP'] = actual_pred['LOSS_CS_DESC_D'] + ' + ' + actual_pred['COV_TYP_DESC_D']
+In [358]:
+def actual_pred_plot(actual_pred,var,title,sorting,datacut):
+    
+    if datacut =='train_test':
+        actual_pred1 = actual_pred[actual_pred['grp']=='train']
+        actual_pred2 = actual_pred[actual_pred['grp']=='test']
+        datacut1='Train'
+        datacut2='Test'
+    elif datacut =='CLM_CNTR_CONV_IND':
+        actual_pred1 = actual_pred[actual_pred['CLM_CNTR_CONV_IND']=='Y']
+        actual_pred2 = actual_pred[actual_pred['CLM_CNTR_CONV_IND']=='N']
+        datacut1='pre-ECOS'
+        datacut2='post-ECOS'
+
+    def get_for_plot(actual_pred):
+        for_plot = actual_pred.groupby(var)['TARGET2',0].agg(['count','mean']).reset_index()
+        for_plot.columns = for_plot.columns.droplevel(0)
+        for_plot.columns = ['Value', 'Count', 'Actual','Count2','Predict']
+        for_plot = for_plot.sort_values(by='Count', ascending=False).drop('Count2',axis=1)
+        for_plot['Actual'] = 100 - for_plot['Actual'] * 100
+        for_plot['Predict'] = 100 - for_plot['Predict'] * 100
+        for_plot = for_plot[~for_plot['Value'].isin(['d - 5','c - 2'])]
+        return(for_plot)                    
+
+    for_plot1 = get_for_plot(actual_pred1)
+    for_plot2 = get_for_plot(actual_pred2)
+
+    if sorting == 'DATE_D' :  
+         for_plot2['D'] = for_plot2['Value'].str.split(r"(", expand=True)[1]
+         for_plot2['D'] = for_plot2['D'].str.split(r",", expand=True)[0]
+         for_plot2['D'] = for_plot2['D'].astype(float)
+         for_plot2 = for_plot2.sort_values(by='D',ascending=True)
+    elif sorting == 'Num':
+         for_plot2 = for_plot2.sort_values(by='Value',ascending=True)
+    elif sorting == 'CAT' or sorting == 'AMT_D':
+         for_plot2 = for_plot2.sort_values(by='Count',ascending=False)
+
+    # Sort according to for_plot2 to make sorting both consistent
+    sorter = for_plot2['Value']
+    to_remove = set(for_plot2['Value']) - set(for_plot1['Value']) 
+    sorter = sorter[~sorter.isin(to_remove)]
+    for_plot1 = for_plot1.set_index('Value').loc[sorter].reset_index()
+    
+    # Plot
+    import matplotlib.style
+    import matplotlib as mpl
+    plt.style.use('seaborn-whitegrid')
+    
+    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(18,3))
+    width = 0.35
+    rotation = 90
+    
+    # colors
+    freq_color = '#3A5A78' # Hartford Blue
+    target_color = '#82282F' # Hartford Red
+    prediction_color = 'darkgreen'
+    
+    # right graph
+    ax1.grid(False)
+    ax1.bar(for_plot2['Value'],for_plot2['Count'], width, label=var,color='white', edgecolor=freq_color)
+    ax1.tick_params(axis='x', labelcolor='black',rotation= rotation)
+    ax1.set_ylabel('Count', color='black', fontsize=10)  # we already handled the x-label with ax1
+    ax12 = ax1.twinx()  # instantiate a second axes that shares the same x-axis
+    ax13 = ax1.twinx()  # instantiate a second axes that shares the same x-axis
+    ax12.set_ylim(90,100)
+    ax12.set_ylabel('PERCENT OF SETTLED CLAIMS', color=target_color, fontsize=10)  # we already handled the x-label with ax1
+    ax12.plot(for_plot2['Value'], for_plot2['Predict'], 'o',ls='-', color = target_color)
+    ax12.tick_params(axis='y', labelcolor=target_color)
+    ax13.set_ylim(90,100)
+    ax13.plot(for_plot2['Value'], for_plot2['Actual'], '+',ls='--', color = prediction_color)
+    ax13.tick_params(axis='y', labelcolor=target_color)
+    textstr = 'actual=  ______'
+    ax1.text(1, 0.35, textstr, color = target_color, fontsize=12, transform=plt.gcf().transFigure)
+    textstr = 'predict =  --------'
+    ax1.text(1, 0.25, textstr, color = prediction_color, fontsize=12, transform=plt.gcf().transFigure)
+    ax1.set_title(datacut2 ,fontsize= 12,  wrap=True)
+    
+    # Left graph 
+    ax0.grid(False)
+    ax0.bar(for_plot1['Value'],for_plot1['Count'], width, label=var,color='white', edgecolor=freq_color)
+    ax0.tick_params(axis='x', labelcolor='black',rotation= rotation)
+    ax0.set_ylabel('Count', color='black', fontsize=10)  # we already handled the x-label with ax1
+    ax02 = ax0.twinx()  # instantiate a second axes that shares the same x-axis
+    ax03 = ax0.twinx()  # instantiate a second axes that shares the same x-axis
+    ax02.set_ylim(90,100)
+    ax02.set_ylabel('PERCENT OF SETTLED CLAIMS', color=target_color, fontsize=10)  # we already handled the x-label with ax1
+    ax02.plot(for_plot1['Value'], for_plot1['Predict'], 'o',ls='-', color = target_color)
+    ax02.tick_params(axis='y', labelcolor=target_color)
+    ax03.set_ylim(90,100)
+    ax03.plot(for_plot1['Value'], for_plot1['Actual'], '+',ls='--', color = prediction_color)
+    ax03.tick_params(axis='y', labelcolor=target_color)
+    ax0.set_title(datacut1 ,fontsize= 12,  wrap=True)
+        
+    fig.suptitle(title ,fontsize= 14,  wrap=True)
+    plt.show()
+In [359]:
+to_see_CAT = ['CLM_SYM_CD',
+ 'CLM_OVRRD_CDC_DESC_D',
+ 'LOSS_LOC_ST_ABBR_D',
+ 'INJ_TYP_DESC_D',
+ 'COV_TYP_DESC_D',
+ 'LOSS_CS_DESC_D',
+ 'BODY_PART_DESC_D',
+ 'BODY_PART_SBTYP_DESC_D',
+ 'FIRST_DEMAND_LMT_RATIO_D',
+ ]
+
+
+
+to_see_Num = [ 
+ 'VENUE_RATING_FINAL',
+ 'CLM_EXPNS_INC_AMT_SF_A',
+ 'FIRST_OFFER_AMT_D',
+ 'INSURED_LIAB_PCT_D',
+ 'LOW_END_AUTH_APPRV_AMT_D',
+ 'OFFER_CNT_D',
+ 'DMND_CNT_D',
+ 'TRIAL_SCHDL_DT_IND',
+ 'LMT_D',
+ 'TEXT_PRETRIAL_REPORT', 
+ 'HIGH_END_TTL_PN_SUFR_AMT_D',
+ 'LOW_END_LPE_RNG_PCT_D',
+ 'FIRST_DEMAND_OFFER_GAP_D',                        
+ 'FIRST_DEMAND_LMT_RATIO_D',
+ 'CLM_CNTR_CONV_IND',
+ 'RISK_TRNSFR_IND',
+ 'HIGH_END_LPE_TTL_APRS_DMG_AMT_D', 
+ 'NON_ZERO_LIAB_PRTY_COUNT_D',
+ 
+]
+In [360]:
+for i in to_see_CAT:
+    actual_pred_plot(actual_pred,i,i,'CAT','CLM_CNTR_CONV_IND')
+    actual_pred_plot(actual_pred,i,i,'CAT','train_test')
+    
+for i in to_see_Num:
+    actual_pred_plot(actual_pred,i,i,'Num','CLM_CNTR_CONV_IND')
+    actual_pred_plot(actual_pred,i,i,'Num','train_test')
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+In [361]:
+actual_pred_plot(actual_pred,'INSURED_LIAB_PCT_D','INSURED_LIAB_PCT_D','CAT','train_test')
+actual_pred.groupby(['NON_ZERO_LIAB_PRTY_COUNT_D','INSURED_LIAB_PCT_D'])['TARGET'].agg(['count','mean']).reset_index()
+
+#pd.crosstab(actual_pred['NON_ZERO_LIAB_PRTY_COUNT_D'],actual_pred['INSURED_LIAB_PCT_D'])
+
+Out[361]:
+NON_ZERO_LIAB_PRTY_COUNT_D	INSURED_LIAB_PCT_D	count	mean
+0	a - 1	a - 0	2383	0.934536
+1	a - 1	b - 1-49	7	1.000000
+2	a - 1	c - 50	7	1.000000
+3	a - 1	d - 51-99	7	1.000000
+4	a - 1	e - 100	2080	0.938462
+5	b - 2+	a - 0	2239	0.962037
+6	b - 2+	b - 1-49	4399	0.966811
+7	b - 2+	c - 50	1946	0.968654
+8	b - 2+	d - 51-99	3384	0.974586
+9	b - 2+	e - 100	1	1.000000
+10	z - NoData	a - 0	4378	0.947921
+In [362]:
+tmp = actual_pred[(actual_pred['LOSS_CS_DESC']=='AI/PI') | (actual_pred['CLM_OVRRD_CDC_DESC_D']=='AI/PI NOC')]
+tmp.groupby(['COV_TYP_DESC'])['TARGET'].agg(['count','mean']).reset_index()
+tmp.groupby(['CLM_OVRRD_CDC_DESC_D','LOSS_CS_DESC'])['TARGET2'].agg(['count','sum']).reset_index()
+Out[362]:
+CLM_OVRRD_CDC_DESC_D	LOSS_CS_DESC	count	sum
+0	AI/PI NOC	AI/PI	234	4
+1	Damage NOC	AI/PI	1	0
+2	Disparagement	AI/PI	163	9
+3	Handling/throwing objects	AI/PI	1	0
+4	Injury NOC	AI/PI	1	0
+5	Other	AI/PI	48	5
+6	Other - non injury	AI/PI	215	4
+7	Slander PI	AI/PI	231	16
+In [363]:
+tmp = actual_pred[actual_pred['CLM_OVRRD_CDC_DESC_D']=='AI/PI NOC']
+tmp.groupby(['COV_TYP_DESC'])['TARGET'].agg(['count','mean']).reset_index()
+tmp.groupby(['CLM_OVRRD_CDC_DESC_D','LOSS_CS_DESC'])['TARGET2'].agg(['count','sum']).reset_index()
+Out[363]:
+CLM_OVRRD_CDC_DESC_D	LOSS_CS_DESC	count	sum
+0	AI/PI NOC	AI/PI	234	4
+In [364]:
+# Number of trials
+top_states = ['CA','NY','TX','NJ','FL','CT', 'PA','NV','AL']
+cov_typ = ['Premises Bodily Injury Liability','Operations Bodily Injury Liability', 'Products Bodily Injury Liability','Operations Property Damage Liability','Personal Injury','Completed Ops Property Damaged Liability']
+tmp = actual_pred[(actual_pred['LOSS_LOC_ST_ABBR'].isin(top_states)) & (actual_pred['COV_TYP_DESC'].isin(cov_typ))  ]
+actual_pred_plot(tmp,'LOSS_LOC_ST_ABBR_D','LOSS_LOC_ST_ABBR_D','CAT','train_test')
+
+In [365]:
+d = tmp.groupby(['LOSS_LOC_ST_ABBR_D','COV_TYP_DESC'])['TARGET'].agg(['count','mean']).reset_index() #.sort_values(by='count',ascending=False)
+d.to_csv('/data/lake/clmds/projects/GL/gl_states_cov_types.csv')
+In [366]:
+# Number of trials
+#top_states = ['CA','NY','TX','NJ','FL','CT', 'PA']
+#cov_typ = ['Premises Bodily Injury Liability','Operations Bodily Injury Liability', 'Products Bodily Injury Liability','Operations Property Damage Liability','Personal Injury','Completed Ops Property Damaged Liability']
+#tmp = actual_pred[( actual_pred['LOSS_LOC_ST_ABBR'].isin(top_states) ) & (model['COV_TYP_DESC'].isin(cov_typ) ) ]
+#tmp.groupby(['LOSS_LOC_ST_ABBR'])['TARGET'].agg(['count','mean']).reset_index() #.sort_values(by='count',ascending=False)
+In [367]:
+#tmp = model[model['LOSS_LOC_ST_ABBR_D'].isin(['NY','CA','NJ','CT','TX'])]
+#tmp.groupby(['LOSS_LOC_ST_ABBR_D','INSURED_LIAB_PCT_D'])['TARGET'].agg(['count','mean']).reset_index()
+In [368]:
+#tmp = model[model['COV_TYP_DESC'].isin(['Premises Bodily Injury Liability','Operations Bodily Injury Liability','Products Bodily Injury Liability','Operations Property Damage Liability','Completed Ops Bodily Injury Liability']) ]
+#tmp.groupby(['COV_TYP_DESC','INSURED_LIAB_PCT_D'])['TARGET'].agg(['count','mean']).reset_index()
+In [369]:
+actual_pred['LOW_END_AUTH_APPRV_AMT_D'].value_counts()
+Out[369]:
+NoData                    14884
+b - 500-5000               1218
+h - 50330.18-100000.0       830
+g - 30756.295-50330.18      727
+j - 100000+                 719
+d - 9000-14516.285          599
+c - 5000-9000               570
+e - 14516.285-20791.56      532
+f - 20791.56-30756.295      531
+a - 0-500                   221
+Name: LOW_END_AUTH_APPRV_AMT_D, dtype: int64
+In [370]:
+tmp = actual_pred[(actual_pred['LOW_END_AUTH_APPRV_AMT_D']=='j - 100000+') ]
+tmp.groupby(['COV_TYP_DESC'])['TARGET'].agg(['count','mean']).reset_index()
+Out[370]:
+COV_TYP_DESC	count	mean
+0	Barber and Beauty Professional Service Bodily Injury	8	1.000000
+1	Completed Ops Bodily Injury Liability	32	1.000000
+2	Hired Non-Owned Bodily Injury	20	0.950000
+3	Liquor Liability Bodily Injury	2	0.500000
+4	Operations Bodily Injury Liability	169	0.970414
+5	Personal Injury	1	1.000000
+6	Premises Bodily Injury Liability	446	0.973094
+7	Products Bodily Injury Liability	41	0.975610
+In [ ]:
+
+In [371]:
+# Save all the parameters
+# Comment out because we do not want to over-write the ones that have been saved.
+# From the original to "_D":
+# v = ['LOSS_LOC_ST_ABBR', 'CLM_OVRRD_CDC_DESC', 'INJ_TYP_DESC', 'BODY_PART_DESC', 'BODY_PART_SBTYP_DESC']
+# for var in v:
+#     mapping_to = model.groupby([var,var+'_D'])['CLM_GID'].agg('count').reset_index().drop(['CLM_GID'],axis=1)
+#     mapping_to.to_pickle('/data/lake/clmds/projects/GL/auto_train_WOE_'+var+'_D.pkl')
+    
+# From "_D" to "_WOE":
+# v = ['LOSS_LOC_ST_ABBR_D', 'CLM_OVRRD_CDC_DESC_D', 'INJ_TYP_DESC_D', 'INSRD_FLT_PCT_D', 'OFFER_CNT_D', 'LMT_D', 'CLM_EXPNS_INC_AMT_SF_A',
+#      'LOW_END_AUTH_APPRV_AMT_D', 'VENUE_RATING_FINAL', 'TEXT_PRETRIAL_REPORT', 'BODY_PART_SBTYP_DESC_D', 'BODY_PART_DESC_D', 'CLM_REOPEN_IND']
+# for var in v:
+#     mapping_to = model.groupby([var, var+'_WOE'])['CLM_GID'].agg('count').reset_index().drop(['CLM_GID'],axis=1)
+#     mapping_to.to_pickle('/data/lake/clmds/projects/GL/auto_train_WOE_'+var+'_WOE.pkl')
+In [ ]:
+
+<-return to TOC
+
+Section 3: The SHAP model interpretability 
+Section3.1: The force plot 
+In [4]:
+def scikit_gains(model,df,var_list,target,seg):
+    y_pred = model.predict(df[var_list])
+    y_pred = pd.Series(y_pred).reset_index(drop='index')
+    y_actual = pd.Series(df[target]).reset_index(drop='index')
+    data = pd.concat([y_actual,y_pred],axis=1)
+    data.columns = [target,'predict']
+    data= data.sort_values(by='predict',ascending=False)
+    data['row_id'] = range(0,0+len(data))
+    data['segment'] = ( data['row_id'] / (len(data)/seg) ).astype(int)
+    # Check the count by decile
+    data.loc[data['segment'] == seg]=(seg-1)
+
+
+    #create gains table
+    gains = data.groupby('segment')[[target,'predict']].agg(['count','sum','min','max']).drop([('TARGET2',   'min'),('TARGET2',   'max'), ('predict', 'count'),('predict',   'sum')],axis=1)
+    gains.columns = ['count','actual','min_pred','max_pred']
+    gains
+
+    #add metrics to the gains table
+    #gains['non_actual'] = gains['count'] - gains['actual']
+    gains['cum_count'] = gains['count'].cumsum()
+    gains['cum_actual'] = gains['actual'].cumsum()
+    #gains['cum_non_actual'] = gains['non_actual'].cumsum()
+    gains['percent_cum_actual'] = (gains['cum_actual'] / np.max(gains['cum_actual'])).round(2)
+    #gains['percent_cum_non_actual'] = (gains['cum_non_actual'] / np.max(gains['cum_non_actual'])).round(2)
+    gains['if_random'] = np.max(gains['cum_actual']) /seg
+    gains['if_random_cum'] = gains['if_random'].cumsum()
+    gains['lift'] = (gains['cum_actual'] / gains['if_random_cum']).round(2)
+    gains['actual_%'] = ((gains['actual'] / gains['count'])*100).round(2)
+    #gains['K_S'] = np.abs( gains['percent_cum_actual'] - gains['percent_cum_non_actual'] ) * 100
+    #gains['gain']=(gains['cum_actual']/gains['cum_count']*100).round(2)
+    #gains = pd.DataFrame(gains)
+    gains = gains[['count', 'actual','actual_%','lift','min_pred','max_pred']]
+    return(gains)
+
+train = pd.read_pickle('/data/lake/clmds/projects/GL/gl_train_WOE.pkl')
+test  = pd.read_pickle('/data/lake/clmds/projects/GL/gl_test_WOE.pkl')
+model = pd.read_pickle('/data/lake/clmds/projects/GL/gl_model_WOE.pkl')
+
+H2O_selectedVarsWOEs = ['RPRT_YEAR',
+ 'CLM_OVRRD_CDC_DESC_D_WOE',
+ 'LOSS_LOC_ST_ABBR_D_WOE',
+ 'TRIAL_SCHDL_DT_IND',
+ 'TEXT_PRETRIAL_REPORT_WOE',
+ 'INJ_TYP_DESC_D_WOE',
+ 'COV_TYP_DESC_D_WOE',
+ 'LOSS_CS_DESC_D_WOE',
+ 'INSURED_LIAB_PCT_D_WOE',
+ 'VENUE_RATING_FINAL_WOE',
+ 'LOW_END_AUTH_APPRV_AMT_D_WOE',
+ 'OFFER_CNT_D_WOE',
+                       ]                        
+                        
+import pickle
+filename = '/data/lake/clmds/projects/GL/gl_scikit_WOEmodel.pkl'
+# load the model from disk
+gl_scikit_WOEmodel = pickle.load(open(filename, 'rb'))
+
+scikit_gains(model = gl_scikit_WOEmodel, df =test, var_list = H2O_selectedVarsWOEs,target='TARGET2', seg = 10 )
+Out[4]:
+count	actual	actual_%	lift	min_pred	max_pred
+segment						
+0	625	103	16.48	3.79	0.087556	0.581944
+1	625	34	5.44	2.52	0.058177	0.087483
+2	625	36	5.76	2.12	0.044841	0.058146
+3	625	28	4.48	1.85	0.035487	0.044837
+4	625	20	3.20	1.62	0.029246	0.035474
+5	625	12	1.92	1.43	0.024064	0.029227
+6	625	16	2.56	1.31	0.018470	0.024062
+7	625	13	2.08	1.20	0.012029	0.018466
+8	625	6	0.96	1.09	0.005620	0.012027
+9	625	4	0.64	1.00	0.000631	0.005608
+In [88]:
+import shap
+shap.initjs()
+def p(j):
+    explainer = shap.TreeExplainer(gl_scikit_WOEmodel)
+    the_shap_values = explainer.shap_values(df_SEG[H2O_selectedVarsWOEs])
+    return(shap.force_plot(explainer.expected_value, the_shap_values[j,:], df_SEG[H2O_selectedVarsWOEs].iloc[j,:])) #, link='logit'))
+
+#p(1)
+
+<-return to TOC
+
+Section 3.2: The waterfall plot 
+In [89]:
+import numpy as np
+import pandas as pd
+import shap
+
+
+class waterfall():
+    def __init__(self, data,
+                       shap_values, 
+                       base_value, 
+                       path = "",
+                       green_color ='#29EA38' , 
+                       red_color = '#FB3C62', 
+                       n=8,
+                       title="The Prediction is " ,
+                       x_lab="",
+                       y_lab="The predicted value",
+                       formatting = "{:,.2f}",
+                       rotation_value = 90,
+                       figsize = (7,5),
+                       fs  = 12
+                
+                ):
+        self.data        = data #['VALUE']
+        #self.mylabel     = data['DESCRIPTION']
+        self.shap_values = shap_values
+        self.base_value  = base_value
+        self.green_color = green_color
+        self.red_color   = red_color
+        self.n           = n
+        self.title       = title
+        self.x_lab       = x_lab
+        self.y_lab       = y_lab
+        self.formatting  = formatting
+        self.rotation_value = rotation_value
+        self.figsize     = figsize
+        self._plot       = pd.DataFrame()
+        self.path        = path
+        self.fs          = fs # fontsize
+
+    def obs_to_explain(self):
+        '''
+          - data: the observation. It is a Pandas series. The index contains the variable names 
+          - shap_values: the shap_values for the above observation 
+          - base_value: the base_value, which is the expected value or the mean of the target value of the training set
+          - green_color: the color for the up bar
+          - red_color: the color for the down bar
+          - for_plot: a sorted data frame by the absolute value of shape in descending order
+          - n: show the top n (default) variables. The rest variables are summed up into "others"
+        '''
+        for_plot = pd.DataFrame({'data': self.data,  # np.round(self.data,2),
+                                 'shap':self.shap_values,
+                                 'shap_abs': np.abs(self.shap_values),
+                                 'label': self.data.index # self.mylabel
+                                })
+        for_plot = for_plot.sort_values(by='shap_abs',ascending=False)
+
+        # Split the variables into n and the rest. Only show the top n
+        for_plot1 = for_plot.iloc[0:self.n,:]
+        for_plot2 = for_plot.iloc[self.n:,:]
+
+        # Sum up the rest as 'others'
+        rest = pd.DataFrame({'data': '','shap':for_plot2['shap'].sum(), 'label': 'Others'},index=['others'])
+        for_plot = for_plot1.append(rest)
+
+        # Sum up the rest into 'others'
+        base = pd.DataFrame({'data': np.round(self.base_value,2),'shap':self.base_value, 'label': 'Base value'},index=['base_value'])
+        for_plot = base.append(for_plot)
+
+        for_plot['blank'] = for_plot['shap'].cumsum().shift(1).fillna(0) # +  base_value
+        for_plot['num']   = np.arange(for_plot.shape[0]).astype(str)
+        #for_plot['label'] = for_plot['num']  + ' - ' + for_plot['label'] + " =" + for_plot['data'].astype(str) 
+        for_plot['label'] = for_plot['num']  + ' - ' + for_plot['label'] 
+        for_plot['color'] = np.where(for_plot['shap']>0,self.green_color,self.red_color)
+        for_plot = for_plot.drop(['data','shap_abs'],axis=1)
+        
+        self.for_plot = for_plot
+        
+        return(for_plot ) 
+    
+    def plt_plot(self):
+        '''
+          - x_lab, y_lab: the x label and y label
+          - formatting: show the value of each bar 
+        '''
+
+        fig, ax = plt.subplots(figsize=self.figsize)
+
+        # Plot the waterfall    
+        plt.bar(range(0,len(self.for_plot.index)), self.for_plot['shap'], width=0.6,
+              bottom=self.for_plot['blank'],     color=self.for_plot['color'])     
+
+        #axis labels
+        plt.xlabel("\n" + self.x_lab, fontsize=self.fs)
+        plt.ylabel(self.y_lab + "\n", fontsize=self.fs)
+
+        #Get the y-axis position for the labels
+        y_height = self.for_plot.shap.cumsum().shift(1).fillna(0)
+
+        #plot_max = self.for_plot['shap'].max()
+        #plot_min = self.for_plot['shap'].min()
+        plot_max = self.for_plot['blank'].max()
+        plot_min = self.for_plot['blank'].min()
+        pos_offset = plot_max / 40
+        plot_offset = plot_max / 15 
+        total = self.for_plot.sum().shap 
+
+        # label the shap values
+        loop = 0
+        for index, row in self.for_plot.iterrows():
+            # For the last item in the list, we don't want to double count
+            if row['shap'] == total:
+                    y = y_height[loop]
+            else:
+                    y = y_height[loop] + row['shap']
+
+            if row['shap'] > 0:
+                    y += (pos_offset*2)
+                    plt.annotate(self.formatting.format(row['shap']),(loop,y),ha="center", color = self.green_color, fontsize=self.fs)
+            else:
+                    y -= (pos_offset*4)
+                    plt.annotate(self.formatting.format(row['shap']),(loop,y),ha="center", color = self.red_color, fontsize=self.fs)
+            loop+=1
+
+        # Range of the ylim
+        plt.ylim(plot_min-round(3.6*plot_offset, 7) ,plot_max+round(3.6*plot_offset, 7))
+        plt.yticks(fontsize=self.fs)
+        
+        #Rotate the labels
+        plt.xticks(range(0,len(self.for_plot)), self.for_plot['num'], fontsize=self.fs)  # rotation=self.rotation_value
+
+        #add the base value line and title
+        #plt.axhline(base_value, color='black', linewidth = 0.6, linestyle="dashed")
+        plt.title('The prediction is ' + str(self.for_plot['shap'].sum().round(3)) ,fontsize=self.fs+1)
+
+        import matplotlib.patches as mpatches
+        red_patch = mpatches.Patch(color=self.red_color, label='Down')
+        green_patch = mpatches.Patch(color=self.green_color, label='Up')
+        plt.legend(handles=[red_patch,green_patch], bbox_to_anchor=[1.01, 1.1], loc='upper left', fontsize=self.fs) 
+        
+        # place a text box in upper left in axes coords
+        textstr = "\n".join(self.for_plot['label'])
+        ax.text(1.03,0.8, textstr, transform=ax.transAxes, fontsize=self.fs, verticalalignment='top')
+        plt.gcf().subplots_adjust(bottom=0.8)
+        plt.tight_layout()
+        return(fig)
+    
+    def plotly_plot(self):
+        import plotly.graph_objects as go
+        import numpy as np
+
+        ys = self.for_plot['shap'].round(2)
+        ms = list(np.repeat('relative',len(ys)))
+        xs = list(self.for_plot['label'].values)
+        texts = self.for_plot['shap'].round(2)
+
+        fig = go.Figure(go.Waterfall(
+            name = "20", orientation = "v",
+            measure = ms,
+            x = xs,
+            textposition = "outside",
+            text = texts,
+            y = ys,
+            connector = {"line":{"color":"rgb(63, 63, 63)"} },
+           ) )
+
+
+        layout = go.Layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)'
+        )
+
+        fig.update_layout(
+            template="plotly_white",
+            title ="The prediction of this observation is " ,
+            margin=dict(l=120, r=120, t=60, b=60),
+            yaxis=dict(
+                title_text="The predicted value" 
+            ),
+            xaxis =dict(
+                tickangle = -90,
+                title_text = "Variables")
+        )
+        #fig.write_html(self.path + "/f.html", auto_open=True)
+In [90]:
+def TakeObs(model,df,var_list, var_NUM,target,seg):
+    '''
+      - sklearn prediction
+      - segment statistics
+      - numerical variables      
+    '''
+    y_pred = model.predict(df[var_list])
+    y_pred = pd.DataFrame(y_pred).reset_index(drop='index')
+    y_pred.columns = ['predict']
+    #y_actual = pd.DataFrame(df[var_NUM+['TARGET2']]).reset_index(drop='index')
+    y_actual = df.reset_index(drop='index')
+    data = pd.concat([y_actual,y_pred],axis=1)
+    data= data.sort_values(by='predict',ascending=False)
+    data['row_id'] = range(0,0+len(data))
+    data['segment'] = ( data['row_id'] / (len(data)/seg) ).astype(int)
+    #data = data[data['segment'] == seg-1].reset_index(drop='index')
+    data = data.reset_index(drop='index')
+    return(data)
+
+predictions_for_waterfall = TakeObs(model = gl_scikit_WOEmodel, df =test, var_list = H2O_selectedVarsWOEs, var_NUM = H2O_selectedVarsWOEs, target='TARGET2', seg = 1 )
+predictions_for_waterfall.shape
+Out[90]:
+(6250, 933)
+In [91]:
+# We supposed to use the mean of the training data. But the mean of the test data is the same as that of the training data, so we use the test data. 
+# In this way we only need to save the test data.
+print(train['TARGET2'].mean().round(2), predictions_for_waterfall['TARGET2'].mean().round(2),predictions_for_waterfall['predict'].mean().round(2))
+0.04 0.04 0.04
+In [92]:
+explainer = shap.TreeExplainer(gl_scikit_WOEmodel)
+# Calculate the SHAP values
+gl_shap_values = explainer(predictions_for_waterfall[H2O_selectedVarsWOEs])
+In [93]:
+varlist = ['RPRT_YEAR',
+ 'CLM_OVRRD_CDC_DESC_D',
+ 'LOSS_LOC_ST_ABBR_D',
+ 'TRIAL_SCHDL_DT_IND',
+ 'TEXT_PRETRIAL_REPORT',
+ 'INJ_TYP_DESC_D',
+ 'COV_TYP_DESC_D',
+ 'LOSS_CS_DESC_D',
+ 'INSURED_LIAB_PCT_D',
+ 'VENUE_RATING_FINAL',
+ 'LOW_END_AUTH_APPRV_AMT_D',
+ 'OFFER_CNT_D',
+                       ]
+In [94]:
+# Prepare the dataset for waterfall
+gl_waterfall = predictions_for_waterfall[varlist]
+gl_waterfall = np.round(gl_waterfall,1)
+gl_waterfall = gl_waterfall.rename(columns=
+    {'LOSS_LOC_ST_ABBR_D'        :'State',
+     'CLM_OVRRD_CDC_DESC_D'      :'CDC description',
+     'LOSS_CS_DESC_D'            :'Loss Cause Description',
+     'COV_TYP_DESC_D'            :'Coverage type',
+     'INJ_TYP_DESC_D'            :'Injury type',
+     'OFFER_CNT_D'               :'Offer count',
+     'VENUE_RATING_FINAL'        :'Venue rating',
+     'RPRT_YEAR'                 :'Report year',
+     'LOW_END_AUTH_APPRV_AMT_D'  :'Approved amount',
+     'INSURED_LIAB_PCT_D'        :'Insured liability percentage',
+     'TRIAL_SCHDL_DT_IND'        :'Trial date scheduled indicator',
+     'TEXT_PRETRIAL_REPORT'      :'Pre-trial report text flag',
+ 
+    }        )
+In [95]:
+this_model = gl_scikit_WOEmodel
+var_list = H2O_selectedVarsWOEs
+target='TARGET2'
+def scoring(df,dfname):
+    y_pred = this_model.predict(df[var_list])
+    y_pred = pd.Series(y_pred).reset_index(drop='index')
+    y_actual = pd.Series(df[target]).reset_index(drop='index')
+    actual_pred = pd.concat([df,y_pred],axis=1)
+    actual_pred['grp'] = dfname
+    return actual_pred
+actual_pred_train = scoring(train,'train')
+actual_pred_test = scoring(test,'test')
+actual_pred = pd.concat([actual_pred_train,actual_pred_test],axis=0)
+actual_pred.shape
+
+actual_pred2 = actual_pred.copy()
+actual_pred2 = actual_pred2.rename(columns=
+    {'LOSS_LOC_ST_ABBR_D'        :'State',
+     'CLM_OVRRD_CDC_DESC_D'      :'CDC description',
+     'LOSS_CS_DESC_D'            :'Loss Cause Description',
+     'COV_TYP_DESC_D'            :'Coverage type',
+     'INJ_TYP_DESC_D'            :'Injury type',
+     'OFFER_CNT_D'               :'Offer count',
+     'VENUE_RATING_FINAL'        :'Venue rating',
+     'RPRT_YEAR'                 :'Report year',
+     'LOW_END_AUTH_APPRV_AMT_D'  :'Approved amount',
+     'INSURED_LIAB_PCT_D'        :'Insured liability percentage',
+     'TRIAL_SCHDL_DT_IND'        :'Trial date scheduled indicator',
+     'TEXT_PRETRIAL_REPORT'      :'Pre-trial report text flag',
+    }      
+     )
+
+to_plotly = [
+    'State',
+    'CDC description',
+    'Loss Cause Description',
+    'Coverage type',
+    'Injury type',
+    'Offer count',
+    'Venue rating',
+    'Approved amount',
+    'Insured liability percentage',
+    'Trial date scheduled indicator',
+    'Pre-trial report text flag'
+]
+all_for_plots = pd.DataFrame()
+for var in to_plotly:
+    for_plot = actual_pred2.groupby(var)['TARGET2',0].agg(['count','mean']).reset_index()
+    for_plot.columns = for_plot.columns.droplevel(0)
+    for_plot.columns = ['Value', 'Count', 'Actual','Count2','Predict']
+    for_plot = for_plot.sort_values(by='Count', ascending=False).drop('Count2',axis=1)
+    for_plot['Actual'] = (100 - for_plot['Actual'] * 100).round(2)
+    for_plot['Predict'] = (100 - for_plot['Predict'] * 100).round(2)
+    for_plot['Var'] = var
+    for_plot = for_plot[['Var','Value', 'Count', 'Actual','Predict']]
+    all_for_plots = all_for_plots.append(for_plot,ignore_index=True)
+In [101]:
+# Package everything for waterfall
+alldata = [gl_shap_values, gl_waterfall, actual_pred2[['LOSS_EVNT_NUM','CLM_NUM']].reset_index(drop='index'),all_for_plots]
+
+import pickle
+with open('/data/lake/clmds/projects/GL/waterfall_plot/gl_alldata.pkl', 'wb') as f2:
+  pickle.dump(alldata, f2)
+
+the_shap_values = alldata[0] 
+the_data = alldata[1] 
+the_ids = alldata[2] 
+the_for_plots = alldata[3]
+In [ ]:
+
+In [ ]:
+
+In [ ]:
+
+In [10]:
+model['COV_TYP_DESC_D'].value_counts() #normalize=True)
+Out[10]:
+Premises Bodily Injury Liability           9190
+Operations Bodily Injury Liability         4287
+Products Bodily Injury Liability           1368
+Operations Property Damage Liability       1332
+Completed Ops Bodily Injury Liability       954
+Personal Injury                             823
+Completed Ops Property Damage Liability     762
+Premises Property Damage Liability          703
+Products Property Damage Liability          551
+Professional Bodily Injury Liability        325
+Hired Non-Owned Bodily Injury               211
+Business Personal Injury                    188
+Other                                        87
+Professional Liability                       47
+NoData                                        3
+Name: COV_TYP_DESC_D, dtype: int64
+
+
